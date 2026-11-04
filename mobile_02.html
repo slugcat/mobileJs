@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Mobile — Study No. 2</title>
+<link rel="stylesheet" href="mobile-engine.css">
+</head>
+<body>
+<script src="mobile-engine.js"></script>
+<script>
+MobileEngine.start({
+  title: "Untitled (Study No. 2)",
+  string: 60,
+  root: {
+    type: 'rod',
+    children: [
+      // a shape with a thread hanging directly off it (no rod)
+      { offset: -150, string: 50, node: {
+          type:'shape', shape:'triangle', size:38, color:'var(--black-shape)',
+          children: [
+            { offset: 9, string: 55, anchorY: 1, node: {
+                type:'shape', shape:'disc', size:14, color:'var(--yellow)'
+            }},
+            { offset: 0, string: 55, anchorY: 1, node: {
+                type:'shape', shape:'disc', size:18, color:'var(--red)'
+            }}
+          ]
+      }},
+      // a curved/cupped panel, tilted and rotated in place
+      { offset: 140, string: 45, node: {
+          type:'shape', shape:'blob', size:40, color:'var(--red)',
+          orientation: -18, tilt: 0.5, curve: 0.6, curveDirection: 'down'
+      }}
+    ]
+  }
+});
+</script>
+</body>
+</html>
