@@ -3,10 +3,601 @@
 <head>
 <meta charset="UTF-8">
 <title>Mobile — Study No. 2</title>
-<link rel="stylesheet" href="mobile-engine.css">
+<style>
+:root{
+  --wall: #E3E1D6;
+  --wall-2: #DAD7C9;
+  --ink: #17181A;
+  --steel: #1C1D1F;
+  --string: #4A4A46;
+  --label-ink: #55534A;
+  --card: #F4F2EA;
+  --red: #C8341F;
+  --yellow: #E8B923;
+  --blue: #1E4D82;
+  --white-shape: #F5F2E8;
+  --black-shape: #131313;
+}
+*{ box-sizing:border-box; }
+html,body{
+  margin:0; padding:0; height:100%;
+  background: radial-gradient(120% 100% at 50% -10%, var(--wall-2), var(--wall) 60%);
+  font-family: "Helvetica Neue", Arial, sans-serif;
+  overflow:hidden;
+}
+#stage{ width:100%; height:100%; display:block; touch-action:none; cursor: grab; }
+#stage:active{ cursor: grabbing; }
+
+.eyebrow{
+  position:absolute; top:22px; left:26px;
+  font-size:11px; letter-spacing:.18em; text-transform:uppercase;
+  color: var(--label-ink); font-weight:600;
+}
+.eyebrow span{ display:block; font-size:10px; letter-spacing:.14em; font-weight:400; opacity:.75; margin-top:3px;}
+
+#placard{
+  position:absolute; left:26px; bottom:24px;
+  background: var(--card);
+  border: 1px solid #cfccbc;
+  padding:12px 16px;
+  max-width: 300px;
+  box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+}
+#placard .title{ font-size:13px; font-weight:700; letter-spacing:.02em; color:var(--ink); margin:0 0 4px; font-style:italic;}
+#placard .meta{ font-size:11px; color:var(--label-ink); margin:0; line-height:1.5; }
+
+#controls{
+  position:absolute; top:22px; right:26px; display:flex; gap:8px;
+}
+.btn{
+  font-size:11px; letter-spacing:.08em; text-transform:uppercase;
+  background:transparent; border:1px solid #9a9788; color:var(--ink);
+  padding:7px 12px; cursor:pointer; font-weight:600;
+}
+.btn:hover{ background: rgba(0,0,0,0.06); }
+
+#hint{
+  position:absolute; bottom:24px; right:26px;
+  font-size:10.5px; color: var(--label-ink); letter-spacing:.02em;
+  max-width:180px; text-align:right; line-height:1.5;
+}
+
+</style>
 </head>
 <body>
-<script src="mobile-engine.js"></script>
+<script>
+/* ============================================================
+   MOBILE STUDIO — shared engine
+   Include this after mobile-engine.css, then call:
+     MobileEngine.start({ title, string, root });
+   from your mobile's own small HTML file.
+   ------------------------------------------------------------
+   SCHEMA
+   Any node (rod OR shape) can have children:
+     children: [ { offset:<number>, string:<number>, anchorY?:<0..1>, node:<node> }, ... ]
+
+   "rod" node:
+     { type:'rod',
+       pivot: <number|undefined> }   // local x of hang point; omit to auto-balance
+
+   "shape" node:
+     { type:'shape', shape:'disc'|'blob'|'crescent'|'diamond'|'leaf'|'triangle',
+       size:<number>, color:'#hex', weight:<number|undefined>, // omit weight to auto-derive from area
+       density:<number optional>,    // material density used only when weight is omitted
+       orientation:<degrees, static in-plane rotation, default 0>,
+       tilt:<radians, static panel pitch (foreshortens vertically), default 0>,
+       bend:<-1.5..1.5, real out-of-plane curvature: total turning angle (radians)
+             at distance `size` from center, like a card pressed on two opposite
+             edges (one-axis cylinder bend, not a saddle). + cups toward viewer,
+             - bows away. default 0 = flat>,
+       attach:<[x,y] in the flat shape's own coords where the hanging string meets
+             it; default [0,0] = center. The shape spins about the vertical line
+             through this point.>,
+       (bent shapes with no `tilt` hang hump-up from their attach point; give
+        `tilt` in radians to override. A child may use `at:[x,y]` to hang from a
+        specific point on this shape instead of offset/anchorY.)
+       bendAxis:<degrees, direction (in the shape's own plane) along which it
+             curves; 0 = curves left-right, 90 = curves top-bottom. default 0> }
+
+   A shape's children hang from a point on the shape itself:
+     offset = horizontal distance from the shape's center
+     anchorY = fraction of size below center to attach (default 1 = bottom edge)
+   ============================================================ */
+(function(){
+
+const DEFAULT_AREAL_DENSITY = 0.0016; // weight per unit area when a shape omits `weight`
+
+/* ---------------- geometry / area ---------------- */
+function shapeDef(shape, size){
+  switch(shape){
+    case 'disc':
+      return {kind:'circle', r:size};
+    case 'rect':
+      return {kind:'polygon', points:[[-size*1.2,-size*0.8],[size*1.2,-size*0.8],[size*1.2,size*0.8],[-size*1.2,size*0.8]]};
+    case 'diamond':
+      return {kind:'polygon', points:[[0,-size],[size*0.72,0],[0,size],[-size*0.72,0]]};
+    case 'triangle':
+      return {kind:'polygon', points:[[0,-size],[size,size*0.8],[-size,size*0.8]]};
+    case 'crescent': {
+      const r = size;
+      return {kind:'path', d:`M ${-r*0.2} ${-r} A ${r} ${r} 0 1 0 ${-r*0.2} ${r} A ${r*0.78} ${r*0.78} 0 1 1 ${-r*0.2} ${-r} Z`};
+    }
+    case 'leaf':
+      return {kind:'path', d:`M 0 ${-size} C ${size*1.1} ${-size*0.4}, ${size*1.1} ${size*0.4}, 0 ${size} C ${-size*1.1} ${size*0.4}, ${-size*1.1} ${-size*0.4}, 0 ${-size} Z`};
+    case 'blob':
+    default:
+      return {kind:'path', d:`M ${0} ${-size} C ${size*1.15} ${-size*0.9}, ${size*1.05} ${size*0.3}, ${size*0.35} ${size*0.85}
+                 C ${-size*0.5} ${size*1.2}, ${-size*1.15} ${size*0.15}, ${-size*0.85} ${-size*0.45}
+                 C ${-size*0.6} ${-size*1.05}, ${size*0.15} ${-size*1.15}, ${0} ${-size} Z`};
+  }
+}
+
+function shoelace(pts){
+  let s = 0;
+  for(let i=0;i<pts.length;i++){
+    const [x1,y1] = pts[i], [x2,y2] = pts[(i+1)%pts.length];
+    s += x1*y2 - x2*y1;
+  }
+  return Math.abs(s)/2;
+}
+
+// hidden scratch <svg><path> used to measure the area of curved (bezier) shapes
+let scratchPath = null;
+function getScratchPath(){
+  if(scratchPath) return scratchPath;
+  const holder = document.createElementNS('http://www.w3.org/2000/svg','svg');
+  holder.setAttribute('style','position:fixed;width:0;height:0;overflow:hidden;visibility:hidden;');
+  scratchPath = document.createElementNS('http://www.w3.org/2000/svg','path');
+  holder.appendChild(scratchPath);
+  document.body.appendChild(holder);
+  return scratchPath;
+}
+function areaFromPathD(d, samples){
+  samples = samples || 72;
+  const p = getScratchPath();
+  p.setAttribute('d', d);
+  const len = p.getTotalLength();
+  const pts = [];
+  for(let i=0;i<samples;i++){
+    const pt = p.getPointAtLength(len * i / samples);
+    pts.push([pt.x, pt.y]);
+  }
+  return shoelace(pts);
+}
+
+// Area of a shape at a given size, in the same square-unit system as `size`.
+// Exact for disc/diamond/triangle; numerically sampled (shoelace on the
+// actual rendered outline) for the curved shapes, so it stays accurate if
+// their path formulas ever change.
+function areaOfShape(shape, size){
+  const def = shapeDef(shape, size);
+  if(def.kind === 'circle') return Math.PI * def.r * def.r;
+  if(def.kind === 'polygon') return shoelace(def.points);
+  return areaFromPathD(def.d);
+}
+
+// Derive a plausible weight from a flat cut shape, the way an actual
+// mobile-maker's material would: weight scales with area. `density` is
+// mass per unit area (default tuned so a size-34 disc weighs about 6,
+// matching the original hand-picked example weights). Pass a smaller
+// density for thin wire-hung shapes, larger for heavier stock.
+function weightFromShape(shape, size, density){
+  return areaOfShape(shape, size) * (density !== undefined ? density : DEFAULT_AREAL_DENSITY);
+}
+
+// Fill in node.weight for any shape node that omitted it, recursively.
+function resolveWeights(node){
+  if(!node) return;
+  if(node.type === 'shape' && node.weight === undefined){
+    node.weight = weightFromShape(node.shape, node.size, node.density);
+  }
+  for(const c of (node.children || [])) resolveWeights(c.node);
+}
+
+/* ---------------- color ---------------- */
+function resolveColor(c){
+  if(c.startsWith('var(')){
+    const name = c.slice(4,-1).trim();
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+  return c;
+}
+function hexToRgb(hex){
+  const h = hex.replace('#','');
+  const full = h.length===3 ? h.split('').map(c=>c+c).join('') : h;
+  const n = parseInt(full,16);
+  return [(n>>16)&255, (n>>8)&255, n&255];
+}
+function shadeColor(hex, pct){ // pct: -100..100, negative darkens
+  if(!/^#[0-9a-f]{3}([0-9a-f]{3})?$/i.test(hex)) return hex;
+  try{
+    const [r,g,b] = hexToRgb(hex);
+    const f = pct/100;
+    const mix = (v)=> Math.max(0, Math.min(255, Math.round(v + (f>0 ? (255-v)*f : v*f))));
+    return `rgb(${mix(r)},${mix(g)},${mix(b)})`;
+  }catch(e){ return hex; }
+}
+
+/* ---------------- physics ----------------
+   1. SPIN (yaw): free rotation about the vertical string axis, driven by
+      momentum + gentle random air current, lightly damped. This is the
+      dominant, ever-present motion of a real mobile. Every node that can
+      be independently suspended (rods AND shapes with their own string)
+      gets this.
+   2. LEAN: only rods have an arm to balance. A rod with no explicit pivot
+      auto-balances at the weighted center of mass of its children (level,
+      like a real mobile maker calculates it); an explicit off-center pivot
+      produces a fixed static lean, not an oscillation. A small ambient
+      sway is layered on top just for liveliness.
+   ---------------------------------------- */
+const YAW_JITTER = 0.5;
+const YAW_DAMPING = 0.995;
+const LEAN_SPAN = 260;
+const LEAN_MAX = 0.5;
+const SWAY_AMPLITUDE = 0.045;
+const SWAY_FREQ = 0.35;
+
+function massOf(node){
+  let m = node.type === 'shape' ? node.weight : 0.6;
+  for(const c of (node.children || [])) m += massOf(c.node);
+  return m;
+}
+
+function initPhysics(node){
+  node._mass = massOf(node);
+  if(node.type === 'rod'){
+    if(node.pivot === undefined){
+      let sum = 0, wsum = 0;
+      for(const c of (node.children||[])){
+        const m = massOf(c.node);
+        sum += m * c.offset; wsum += m;
+      }
+      node._pivot = wsum > 0 ? sum / wsum : 0;
+    } else {
+      node._pivot = node.pivot;
+    }
+    let imbalance = 0;
+    for(const c of (node.children||[])){
+      imbalance += massOf(c.node) * (c.offset - node._pivot);
+    }
+    node._leanBase = Math.max(-LEAN_MAX, Math.min(LEAN_MAX, imbalance / (node._mass * LEAN_SPAN)));
+  } else {
+    node._pivot = 0;
+    node._leanBase = 0;
+  }
+  node._swayPhase = Math.random() * Math.PI * 2;
+  node._swayFreq = SWAY_FREQ * (0.7 + Math.random()*0.6);
+  node._yaw = (Math.random()-0.5) * 0.6;
+  node._yawOmega = (Math.random()-0.5) * 0.3;
+  for(const c of (node.children||[])) initPhysics(c.node);
+}
+
+function stepPhysics(node, dt, t){
+  node._yawOmega += (Math.random()-0.5) * YAW_JITTER * dt;
+  node._yawOmega *= YAW_DAMPING;
+  node._yaw += node._yawOmega * dt;
+  node._lean = node._leanBase + SWAY_AMPLITUDE * Math.sin(t*node._swayFreq + node._swayPhase);
+  for(const c of (node.children||[])) stepPhysics(c.node, dt, t);
+}
+
+/* ---------------- rendering ---------------- */
+const NS = 'http://www.w3.org/2000/svg';
+function el(tag, attrs){
+  const e = document.createElementNS(NS, tag);
+  for(const k in attrs) e.setAttribute(k, attrs[k]);
+  return e;
+}
+function shapePath(shape, size){
+  const def = shapeDef(shape, size);
+  if(def.kind === 'circle') return el('circle', {r:def.r});
+  if(def.kind === 'polygon') return el('polygon', {points:def.points.map(p=>p.join(',')).join(' ')});
+  return el('path', {d:def.d});
+}
+
+// Local point (lx,0) on a node leaning by `lean` then spun by `yaw` about
+// the vertical axis. Yaw never touches height, so relative heights hold
+// as a piece turns -- exactly like the real thing.
+function project(lx, lean, yaw){
+  const liftY = lx * Math.sin(lean);
+  const spanH = lx * Math.cos(lean);
+  const dx = spanH * Math.cos(yaw);
+  const z  = spanH * Math.sin(yaw);
+  return { dx, dy: -liftY, z };
+}
+
+let gradientCounter = 0;
+
+/* ---------------- 3D panel model ----------------
+   Every shape is a thin sheet. Pipeline, all orthographic:
+     flat outline -> BEND (one-axis cylinder, arc length preserved)
+                  -> ROLL (`orientation`, about the view axis)
+                  -> PITCH (`tilt`, about the horizontal axis)
+                  -> YAW (live spin, about the vertical string)
+                  -> project to screen.
+   Shading is Lambert from a fixed light using the true surface normal, so a
+   bent panel shows a real light-to-dark gradient that shifts as it spins. */
+const LIGHT = (()=>{ const v=[-0.4,-0.6,0.7], m=Math.hypot(v[0],v[1],v[2]); return v.map(a=>a/m); })();
+const L_REST = 0.3 + 0.7*LIGHT[2]; // brightness of a flat panel facing the viewer = unshaded base color
+
+// Dense outline samples (shape frame) so bending curves edges smoothly.
+function outlinePoints(shape, size){
+  const def = shapeDef(shape, size);
+  if(def.kind === 'circle'){
+    const pts = [];
+    for(let i=0;i<72;i++){ const a = i/72*Math.PI*2; pts.push([def.r*Math.cos(a), def.r*Math.sin(a)]); }
+    return pts;
+  }
+  if(def.kind === 'polygon'){
+    const pts = [], P = def.points;
+    for(let i=0;i<P.length;i++){
+      const [x1,y1] = P[i], [x2,y2] = P[(i+1)%P.length];
+      const n = Math.max(1, Math.ceil(Math.hypot(x2-x1,y2-y1) / (size/10)));
+      for(let k=0;k<n;k++) pts.push([x1+(x2-x1)*k/n, y1+(y2-y1)*k/n]);
+    }
+    return pts;
+  }
+  const p = getScratchPath();
+  p.setAttribute('d', def.d);
+  const len = p.getTotalLength(), pts = [];
+  for(let i=0;i<160;i++){ const q = p.getPointAtLength(len*i/160); pts.push([q.x,q.y]); }
+  return pts;
+}
+
+const CAM_ELEV = 0.3; // camera looks slightly down so horizontal panels show as ellipses, not edge-on lines
+
+function shapeFrame(node){
+  const bend = Math.max(-1.5, Math.min(1.5, node.bend||0));
+  // Default pose: a bent panel hangs from its attach point with the hump on top
+  // (tangent plane horizontal there). Flat panels default to facing the viewer.
+  const pitch = node.tilt !== undefined ? node.tilt : (bend ? -Math.sign(bend)*Math.PI/2 : 0);
+  const roll = (node.orientation||0)*Math.PI/180;
+  const yaw = node._yaw||0;
+  const A = (node.bendAxis||0)*Math.PI/180;
+  const kappa = bend / node.size;
+  const at = node.attach || [0,0];
+  const cA=Math.cos(A), sA=Math.sin(A);
+  const cr=Math.cos(roll), sr=Math.sin(roll);
+  const cp=Math.cos(pitch), sp=Math.sin(pitch);
+  const cy=Math.cos(yaw), sy=Math.sin(yaw);
+  const ce=Math.cos(CAM_ELEV), se=Math.sin(CAM_ELEV);
+
+  function bendPoint(x,y){ // flat (x,y) -> bent 3D, z toward viewer
+    const u = x*cA + y*sA, v = -x*sA + y*cA;
+    let ub = u, z = 0;
+    if(Math.abs(kappa) > 1e-6){ ub = Math.sin(kappa*u)/kappa; z = (1-Math.cos(kappa*u))/kappa; }
+    return [ub*cA - v*sA, ub*sA + v*cA, z];
+  }
+  function rollPitch(p){
+    const x1 = p[0]*cr - p[1]*sr, y1 = p[0]*sr + p[1]*cr, z1 = p[2];
+    return [x1, y1*cp - z1*sp, y1*sp + z1*cp];
+  }
+  function yawCam(p){ // spin about the vertical string, then camera elevation
+    const x3 = p[0]*cy + p[2]*sy, z3 = -p[0]*sy + p[2]*cy, y3 = p[1];
+    return [x3, y3*ce + z3*se, -y3*se + z3*ce];
+  }
+  const A3 = rollPitch(bendPoint(at[0], at[1]));
+  const orient = (n)=> yawCam(rollPitch(n)); // rotations only (for normals)
+  const point = (x,y)=>{
+    const p = rollPitch(bendPoint(x,y));
+    return yawCam([p[0]-A3[0], p[1]-A3[1], p[2]-A3[2]]); // attach point -> origin = string end
+  };
+  return { kappa, cA, sA, orient, point };
+}
+
+function shadePct(n){ // world normal -> lighten/darken percent (two-sided)
+  if(n[2] < 0) n = [-n[0],-n[1],-n[2]];
+  const d = Math.max(0, n[0]*LIGHT[0] + n[1]*LIGHT[1] + n[2]*LIGHT[2]);
+  return (0.3 + 0.7*d - L_REST) * 90;
+}
+
+function drawShapeSelf(parentGroup, defs, node, worldX, worldY, depth){
+  const fr = shapeFrame(node);
+  node._frame = fr; // children's attach points use the same transform
+  if(!node._outline) node._outline = outlinePoints(node.shape, node.size);
+  const outline = node._outline;
+
+  const depthScale = 1 + Math.max(-0.18, Math.min(0.18, -depth*0.0009));
+  const g = el('g', {transform:`translate(${worldX},${worldY}) scale(${depthScale})`});
+  const pts = outline.map(([x,y])=>{ const p = fr.point(x,y); return p[0].toFixed(2)+','+p[1].toFixed(2); }).join(' ');
+  const poly = el('polygon', {points:pts});
+
+  const baseFill = resolveColor(node.color);
+  let fill;
+  if(Math.abs(fr.kappa) < 1e-6){
+    fill = shadeColor(baseFill, shadePct(fr.orient([0,0,1])));
+  } else {
+    // Shading varies only along the bend direction: sample the true normal
+    // along the panel's centerline and lay it out as a screen-space gradient.
+    let umin = Infinity, umax = -Infinity;
+    for(const [x,y] of outline){ const u = x*fr.cA + y*fr.sA; if(u<umin) umin=u; if(u>umax) umax=u; }
+    const N = 14, S = [];
+    for(let i=0;i<=N;i++){
+      const u = umin + (umax-umin)*i/N;
+      const c = fr.point(u*fr.cA, u*fr.sA);
+      const ks = fr.kappa*u;
+      const n = fr.orient([-Math.sin(ks)*fr.cA, -Math.sin(ks)*fr.sA, Math.cos(ks)]);
+      S.push({x:c[0], y:c[1], pct:shadePct(n)});
+    }
+    const dx = S[N].x - S[0].x, dy = S[N].y - S[0].y, len2 = dx*dx + dy*dy;
+    if(len2 < 4){ // seen edge-on: gradient degenerates, use a single tone
+      fill = shadeColor(baseFill, S[N>>1].pct);
+    } else {
+      const id = 'panel' + (gradientCounter++);
+      const grad = el('linearGradient', {id, gradientUnits:'userSpaceOnUse', x1:S[0].x, y1:S[0].y, x2:S[N].x, y2:S[N].y});
+      const stops = S.map(s=>({t:Math.max(0,Math.min(1,((s.x-S[0].x)*dx + (s.y-S[0].y)*dy)/len2)), pct:s.pct}))
+                     .sort((a,b)=>a.t-b.t);
+      for(const s of stops) grad.appendChild(el('stop', {offset:s.t.toFixed(4), 'stop-color':shadeColor(baseFill, s.pct)}));
+      defs.appendChild(grad);
+      fill = `url(#${id})`;
+    }
+  }
+  poly.setAttribute('fill', fill);
+  poly.setAttribute('stroke', baseFill === resolveColor('var(--white-shape)') ? '#1a1a1a' : 'none');
+  poly.setAttribute('stroke-width', '1.2');
+  poly.setAttribute('stroke-linejoin', 'round');
+  poly.setAttribute('opacity', Math.max(0.8, Math.min(1, 1 - depth*0.0006)));
+  g.appendChild(poly);
+  g.appendChild(el('circle', {cx:0, cy:0, r:2.6, fill:'var(--steel)'}));
+  parentGroup.appendChild(g);
+}
+
+function drawRodSelf(parentGroup, node, worldX, worldY, yaw, lean){
+  let minOff = 0, maxOff = 0;
+  for(const c of (node.children||[])){ minOff = Math.min(minOff, c.offset); maxOff = Math.max(maxOff, c.offset); }
+  const leftLocal = minOff - node._pivot, rightLocal = maxOff - node._pivot;
+  const p1 = project(leftLocal, lean, yaw), p2 = project(rightLocal, lean, yaw);
+  const rodLine = el('line', {
+    x1: worldX+p1.dx, y1: worldY+p1.dy, x2: worldX+p2.dx, y2: worldY+p2.dy,
+    stroke:'var(--steel)', 'stroke-width':4, 'stroke-linecap':'round'
+  });
+  parentGroup.appendChild(rodLine);
+  parentGroup.appendChild(el('circle', {cx:worldX, cy:worldY, r:4.5, fill:'var(--steel)'}));
+}
+
+let hitList = [];
+function drawNode(parentGroup, defs, node, worldX, worldY, depth){
+  depth = depth || 0;
+  const yaw = node._yaw || 0, lean = node._lean || 0, pivot = node._pivot || 0;
+
+  if(node.type === 'shape') drawShapeSelf(parentGroup, defs, node, worldX, worldY, depth);
+  else drawRodSelf(parentGroup, node, worldX, worldY, yaw, lean);
+
+  hitList.push({x:worldX, y:worldY, r:(node.size||14)+6, node});
+
+  for(const c of (node.children||[])){
+    let ax, ay, childDepth;
+    if(node.type === 'shape'){
+      const q = c.at ? node._frame.point(c.at[0], c.at[1]) : node._frame.point(c.offset, (c.anchorY !== undefined ? c.anchorY : 1) * node.size);
+      ax = worldX + q[0]; ay = worldY + q[1]; childDepth = depth + q[2];
+    } else {
+      const p = project(c.offset - pivot, lean, yaw);
+      ax = worldX + p.dx; ay = worldY + p.dy; childDepth = depth + p.z;
+    }
+    parentGroup.appendChild(el('circle', {cx:ax, cy:ay, r:2.6, fill:'var(--steel)'}));
+    const childWorldY = ay + c.string;
+    parentGroup.appendChild(el('line', {x1:ax, y1:ay, x2:ax, y2:childWorldY, stroke:'var(--string)', 'stroke-width':1.4}));
+    drawNode(parentGroup, defs, c.node, ax, childWorldY, childDepth);
+  }
+}
+
+function countShapes(node){
+  let n = node.type === 'shape' ? 1 : 0;
+  for(const c of (node.children||[])) n += countShapes(c.node);
+  return n;
+}
+
+/* ---------------- DOM scaffold ---------------- */
+function buildDOM(spec){
+  const eyebrow = document.createElement('div');
+  eyebrow.className = 'eyebrow';
+  eyebrow.innerHTML = `MOBILE STUDIO<span>a simulator for Calder-style hanging mobiles</span>`;
+  document.body.appendChild(eyebrow);
+
+  const controls = document.createElement('div');
+  controls.id = 'controls';
+  controls.innerHTML = `<button class="btn" id="btnPuff">Puff of Air</button><button class="btn" id="btnReset">Reset</button>`;
+  document.body.appendChild(controls);
+
+  const svg = el('svg', {id:'stage', viewBox:'0 0 1000 700', preserveAspectRatio:'xMidYMid meet'});
+  document.body.appendChild(svg);
+
+  const placard = document.createElement('div');
+  placard.id = 'placard';
+  placard.innerHTML = `<p class="title" id="placardTitle"></p><p class="meta" id="placardMeta"></p>`;
+  document.body.appendChild(placard);
+
+  const hint = document.createElement('div');
+  hint.id = 'hint';
+  hint.innerHTML = `Click and drag any piece<br>to give it a spin`;
+  document.body.appendChild(hint);
+
+  return svg;
+}
+
+/* ---------------- entry point ---------------- */
+function start(spec){
+  resolveWeights(spec.root);
+  initPhysics(spec.root);
+
+  const svg = buildDOM(spec);
+  document.getElementById('placardTitle').textContent = spec.title || 'Untitled';
+  document.getElementById('placardMeta').textContent =
+    `${countShapes(spec.root)} elements \u00b7 hand-balanced \u00b7 2026`;
+
+  let layer, defs;
+  function rebuildScene(){
+    svg.innerHTML = '';
+    defs = el('defs', {});
+    svg.appendChild(defs);
+    layer = el('g', {id:'mobileLayer'});
+    svg.appendChild(layer);
+    svg.appendChild(el('rect', {x:495, y:14, width:10, height:10, fill:'var(--steel)'}));
+  }
+  function render(){
+    rebuildScene();
+    hitList = [];
+    const rootTop = {x:500, y:24};
+    layer.appendChild(el('line', {x1:rootTop.x, y1:rootTop.y, x2:rootTop.x, y2:rootTop.y+(spec.string||60),
+      stroke:'var(--string)', 'stroke-width':1.4}));
+    drawNode(layer, defs, spec.root, rootTop.x, rootTop.y+(spec.string||60), 0);
+  }
+
+  // interaction
+  let dragging = null, lastPt = null;
+  function svgPoint(evt){
+    const pt = svg.createSVGPoint();
+    const t = evt.touches ? evt.touches[0] : evt;
+    pt.x = t.clientX; pt.y = t.clientY;
+    return pt.matrixTransform(svg.getScreenCTM().inverse());
+  }
+  function onDown(evt){
+    const p = svgPoint(evt);
+    let nearest = null, bestD = Infinity;
+    for(const h of hitList){
+      const d = Math.hypot(h.x-p.x, h.y-p.y);
+      if(d < h.r+10 && d < bestD){ bestD = d; nearest = h; }
+    }
+    if(nearest){ dragging = nearest.node; lastPt = p; evt.preventDefault(); }
+  }
+  function onMove(evt){
+    if(!dragging) return;
+    const p = svgPoint(evt);
+    dragging._yawOmega += (p.x - lastPt.x) * 0.02;
+    lastPt = p;
+    evt.preventDefault();
+  }
+  function onUp(){ dragging = null; }
+  svg.addEventListener('mousedown', onDown);
+  window.addEventListener('mousemove', onMove);
+  window.addEventListener('mouseup', onUp);
+  svg.addEventListener('touchstart', onDown, {passive:false});
+  window.addEventListener('touchmove', onMove, {passive:false});
+  window.addEventListener('touchend', onUp);
+
+  document.getElementById('btnPuff').addEventListener('click', ()=>{
+    (function puff(node){
+      node._yawOmega += (Math.random()-0.5) * 2.2;
+      for(const c of (node.children||[])) puff(c.node);
+    })(spec.root);
+  });
+  document.getElementById('btnReset').addEventListener('click', ()=> initPhysics(spec.root));
+
+  let last = performance.now();
+  const startTime = last;
+  function frame(now){
+    const dt = Math.min((now-last)/1000, 0.033);
+    last = now;
+    stepPhysics(spec.root, dt, (now-startTime)/1000);
+    render();
+    requestAnimationFrame(frame);
+  }
+  requestAnimationFrame(frame);
+}
+
+window.MobileEngine = { start, weightFromShape, areaOfShape };
+})();
+
+</script>
 <script>
 MobileEngine.start({
   title: "Untitled (Study No. 2)",
@@ -14,22 +605,25 @@ MobileEngine.start({
   root: {
     type: 'rod',
     children: [
-      // a shape with a thread hanging directly off it (no rod)
-      { offset: -150, string: 50, node: {
+      // flat triangle hung from its top vertex, thread hanging off its base
+      { offset: -170, string: 50, node: {
           type:'shape', shape:'triangle', size:38, color:'var(--black-shape)',
+          attach: [0,-38],
           children: [
-            { offset: 9, string: 55, anchorY: 1, node: {
+            { offset: 6, string: 55, anchorY: 1, node: {
                 type:'shape', shape:'disc', size:14, color:'var(--yellow)'
-            }},
-            { offset: 0, string: 55, anchorY: 1, node: {
-                type:'shape', shape:'disc', size:18, color:'var(--red)'
             }}
           ]
       }},
-      // a curved/cupped panel, tilted and rotated in place
-      { offset: 140, string: 45, node: {
-          type:'shape', shape:'blob', size:40, color:'var(--red)',
-          orientation: -18, tilt: 0.5, curve: 0.6, curveDirection: 'down'
+      // card bent along its length, hung from its center, hump up (defaults)
+      { offset: 0, string: 90, node: {
+          type:'shape', shape:'rect', size:36, color:'var(--blue)',
+          bend: 1.1
+      }},
+      // disc bent along a diagonal, hung from its center, hump up
+      { offset: 160, string: 60, node: {
+          type:'shape', shape:'disc', size:40, color:'var(--red)',
+          bend: 0.9, bendAxis: 35
       }}
     ]
   }
