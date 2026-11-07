@@ -36,9 +36,11 @@
              orientation:90, targetSlope:-TILT*level, bend:bend, bendAxis:90,
              children:kids };
   }
-  // fat end of a size-s leaf is at flat (0, s); the tip is at (0, -s)
-  const fat = (s, str, node) => ({ at:[0, s],  string:str, node:node });
-  const tip = (s, str, node) => ({ at:[0, -s], string:str, node:node });
+
+  const FAT_ATTACH = 0.90; // inset 5% of total leaf length (0.10*s) from base edge
+  const TIP_ATTACH = -0.82; // inset 9% of total leaf length (0.18*s) from pointed tip
+  const fat = (s, str, node) => ({ at:[0, s * FAT_ATTACH], string:str, node:node });
+  const tip = (s, str, node) => ({ at:[0, s * TIP_ATTACH], string:str, node:node });
 
   const s0 = 120, s01 = s0*FAT, s02 = s0*TIP;
   const s021 = s02*FAT, s022 = s02*TIP;

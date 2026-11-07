@@ -45,6 +45,8 @@
 (function(){
 
 const DEFAULT_AREAL_DENSITY = 0.0016; // weight per unit area when a shape omits `weight`
+const DEFAULT_CAM_ELEV = 0.3;         // default camera elevation in radians (~17 deg above)
+let camElev = DEFAULT_CAM_ELEV;       // live camera elevation controlled by right-hand slider
 
 /* ---------------- geometry / area ---------------- */
 function shapeDef(shape, size){
@@ -239,14 +241,15 @@ function shapePath(shape, size){
 }
 
 // Local point (lx,0) on a node leaning by `lean` then spun by `yaw` about
-// the vertical axis. Yaw never touches height, so relative heights hold
-// as a piece turns -- exactly like the real thing.
+// the vertical axis, then projected with camera elevation `camElev`.
 function project(lx, lean, yaw){
   const liftY = lx * Math.sin(lean);
   const spanH = lx * Math.cos(lean);
   const dx = spanH * Math.cos(yaw);
   const z  = spanH * Math.sin(yaw);
-  return { dx, dy: -liftY, z };
+  const y  = -liftY;
+  const ce = Math.cos(camElev), se = Math.sin(camElev);
+  return { dx, dy: y * ce + z * se, z: -y * se + z * ce };
 }
 
 let gradientCounter = 0;
@@ -287,8 +290,6 @@ function outlinePoints(shape, size){
   return pts;
 }
 
-const CAM_ELEV = 0.3; // camera looks slightly down so horizontal panels show as ellipses, not edge-on lines
-
 function shapeFrame(node){
   const bend = Math.max(-1.5, Math.min(1.5, node.bend||0));
   // Default pose: a bent panel hangs from its attach point with the hump on top
@@ -305,7 +306,7 @@ function shapeFrame(node){
   const slopeDeg = node._slopeDeg !== undefined ? node._slopeDeg : (typeof node.slope === 'number' ? node.slope : 0);
   const slope = slopeDeg*Math.PI/180, cs=Math.cos(slope), ss=Math.sin(slope);
   const cy=Math.cos(yaw), sy=Math.sin(yaw);
-  const ce=Math.cos(CAM_ELEV), se=Math.sin(CAM_ELEV);
+  const ce=Math.cos(camElev), se=Math.sin(camElev);
 
   function bendPoint(x,y){ // flat (x,y) -> bent 3D, z toward viewer
     const u = x*cA + y*sA, v = -x*sA + y*cA;
@@ -528,6 +529,7 @@ let HIDE_JOINTS = false; // spec.hideJoints: don't draw the dots where strings m
 function drawNode(parentGroup, defs, node, worldX, worldY, depth){
   depth = depth || 0;
   const yaw = node._yaw || 0, lean = node._lean || 0, pivot = node._pivot || 0;
+  const ce = Math.cos(camElev), se = Math.sin(camElev);
 
   if(node.type === 'shape') drawShapeSelf(parentGroup, defs, node, worldX, worldY, depth);
   else drawRodSelf(parentGroup, node, worldX, worldY, yaw, lean);
@@ -544,9 +546,10 @@ function drawNode(parentGroup, defs, node, worldX, worldY, depth){
       ax = worldX + p.dx; ay = worldY + p.dy; childDepth = depth + p.z;
     }
     if(!HIDE_JOINTS) parentGroup.appendChild(el('circle', {cx:ax, cy:ay, r:2.6, fill:'var(--steel)'}));
-    const childWorldY = ay + c.string;
+    const childWorldY = ay + c.string * ce;
+    const nextDepth = childDepth - c.string * se;
     parentGroup.appendChild(el('line', {x1:ax, y1:ay, x2:ax, y2:childWorldY, stroke:'var(--string)', 'stroke-width':1.4}));
-    drawNode(parentGroup, defs, c.node, ax, childWorldY, childDepth);
+    drawNode(parentGroup, defs, c.node, ax, childWorldY, nextDepth);
   }
 }
 
@@ -557,7 +560,67 @@ function countShapes(node){
 }
 
 /* ---------------- DOM scaffold ---------------- */
+function injectSliderStyles(){
+  if(document.getElementById('mobile-engine-slider-styles')) return;
+  const style = document.createElement('style');
+  style.id = 'mobile-engine-slider-styles';
+  style.textContent = `
+    #camControl {
+      position: absolute;
+      right: 26px;
+      top: 50%;
+      transform: translateY(-50%);
+      background: var(--card, #F4F2EA);
+      border: 1px solid #cfccbc;
+      padding: 12px 10px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 8px;
+      box-shadow: 0 2px 10px rgba(0,0,0,0.08);
+      user-select: none;
+      z-index: 10;
+    }
+    #camControl .cam-title {
+      font-size: 9.5px;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+      color: var(--label-ink, #55534A);
+      font-weight: 600;
+      text-align: center;
+      line-height: 1.2;
+    }
+    #camControl .cam-bound {
+      font-size: 9px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: var(--label-ink, #55534A);
+      opacity: 0.75;
+    }
+    #camSlider {
+      writing-mode: vertical-lr;
+      direction: rtl;
+      width: 18px;
+      height: 170px;
+      margin: 2px 0;
+      cursor: ns-resize;
+      accent-color: var(--ink, #17181A);
+    }
+    #camValue {
+      font-size: 11px;
+      font-weight: 600;
+      color: var(--ink, #17181A);
+      font-variant-numeric: tabular-nums;
+      min-width: 36px;
+      text-align: center;
+    }
+  `;
+  document.head.appendChild(style);
+}
+
 function buildDOM(spec){
+  injectSliderStyles();
+
   const eyebrow = document.createElement('div');
   eyebrow.className = 'eyebrow';
   eyebrow.innerHTML = `MOBILE STUDIO<span>a simulator for Calder-style hanging mobiles</span>`;
@@ -567,6 +630,19 @@ function buildDOM(spec){
   controls.id = 'controls';
   controls.innerHTML = `<button class="btn" id="btnPuff">Puff of Air</button><button class="btn" id="btnReset">Reset</button>`;
   document.body.appendChild(controls);
+
+  const camControl = document.createElement('div');
+  camControl.id = 'camControl';
+  camControl.title = 'Adjust camera height relative to the mobile (double-click to reset)';
+  const initDeg = Math.round(camElev * 180 / Math.PI);
+  camControl.innerHTML = `
+    <div class="cam-title">Camera<br>Height</div>
+    <div class="cam-bound">High</div>
+    <input type="range" id="camSlider" min="-60" max="60" step="1" value="${initDeg}" aria-label="Camera height">
+    <div class="cam-bound">Low</div>
+    <div id="camValue">${initDeg > 0 ? '+' + initDeg : initDeg}&deg;</div>
+  `;
+  document.body.appendChild(camControl);
 
   const svg = el('svg', {id:'stage', viewBox:'0 0 1000 700', preserveAspectRatio:'xMidYMid meet'});
   document.body.appendChild(svg);
@@ -587,6 +663,11 @@ function buildDOM(spec){
 /* ---------------- entry point ---------------- */
 function start(spec){
   HIDE_JOINTS = !!spec.hideJoints;
+  if(typeof spec.cameraElevation === 'number'){
+    camElev = spec.cameraElevation * Math.PI / 180;
+  } else {
+    camElev = DEFAULT_CAM_ELEV;
+  }
   resolveWeights(spec.root);
   resolveTilts(spec.root);
   initPhysics(spec.root);
@@ -594,7 +675,7 @@ function start(spec){
   const svg = buildDOM(spec);
   document.getElementById('placardTitle').textContent = spec.title || 'Untitled';
   document.getElementById('placardMeta').textContent =
-    `${countShapes(spec.root)} elements \u00b7 hand-balanced \u00b7 2026`;
+    `${countShapes(spec.root)} elements · hand-balanced · 2026`;
 
   if(spec.buildSheet){
     const rows = buildSheet(spec.root, []);
@@ -602,11 +683,25 @@ function start(spec){
     const sheet = document.createElement('div');
     sheet.id = 'sheet';
     sheet.innerHTML = '<p class="title">Build sheet</p><table><tr><th>leaf</th><th>length</th><th>wt</th><th>hang from fat end</th><th>tilt</th></tr>' +
-      rows.map(r=>`<tr><td>${r.id}</td><td>${f(r.size*2)}</td><td>${f(r.weight)}</td><td>${f(r.fromEnd)}</td><td>${f(Math.abs(r.tilt))}\u00b0</td></tr>`).join('') +
+      rows.map(r=>`<tr><td>${r.id}</td><td>${f(r.size*2)}</td><td>${f(r.weight)}</td><td>${f(r.fromEnd)}</td><td>${f(Math.abs(r.tilt))}°</td></tr>`).join('') +
       '</table><p class="meta">length = tip to base; hang = distance along the leaf from the base end to where the thread ties (same units as length)</p>';
     document.body.appendChild(sheet);
     console.table(rows);
   }
+
+  const camSlider = document.getElementById('camSlider');
+  const camValue = document.getElementById('camValue');
+  function updateCamFromDeg(deg){
+    camElev = deg * Math.PI / 180;
+    camSlider.value = String(deg);
+    camValue.innerHTML = `${deg > 0 ? '+' + deg : deg}&deg;`;
+  }
+  camSlider.addEventListener('input', ()=>{
+    updateCamFromDeg( parseFloat(camSlider.value) );
+  });
+  camSlider.addEventListener('dblclick', ()=>{
+    updateCamFromDeg( Math.round(DEFAULT_CAM_ELEV * 180 / Math.PI) );
+  });
 
   let layer, defs;
   function rebuildScene(){
@@ -621,9 +716,11 @@ function start(spec){
     rebuildScene();
     hitList = [];
     const rootTop = {x:500, y:24};
-    layer.appendChild(el('line', {x1:rootTop.x, y1:rootTop.y, x2:rootTop.x, y2:rootTop.y+(spec.string||60),
+    const topStr = (spec.string||60) * Math.cos(camElev);
+    const topDepth = -(spec.string||60) * Math.sin(camElev);
+    layer.appendChild(el('line', {x1:rootTop.x, y1:rootTop.y, x2:rootTop.x, y2:rootTop.y+topStr,
       stroke:'var(--string)', 'stroke-width':1.4}));
-    drawNode(layer, defs, spec.root, rootTop.x, rootTop.y+(spec.string||60), 0);
+    drawNode(layer, defs, spec.root, rootTop.x, rootTop.y+topStr, topDepth);
   }
 
   // interaction
@@ -664,7 +761,10 @@ function start(spec){
       for(const c of (node.children||[])) puff(c.node);
     })(spec.root);
   });
-  document.getElementById('btnReset').addEventListener('click', ()=> initPhysics(spec.root));
+  document.getElementById('btnReset').addEventListener('click', ()=>{
+    initPhysics(spec.root);
+    updateCamFromDeg( Math.round(DEFAULT_CAM_ELEV * 180 / Math.PI) );
+  });
 
   let last = performance.now();
   const startTime = last;
