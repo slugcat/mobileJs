@@ -15,8 +15,10 @@
              '-- L0222 (small, terminal) from L022's pointed end
    (The schematic ends at L0222, so it has no children.) */
 (function(){
-  const BEND = 1.0;
-  const TILT = 23;               // extra degrees of tilt per level, rounded end rising
+  const BEND_TOP = 1.0;
+  const BEND_BOT = 1.25;
+  const TILT = 15; // 15 deg per level -> 0, -15, -30, -45 deg
+
   // dark green, each step lighter: parent < big child < small child (< its own children ...)
   function green(step){
     const base = [12,38,24], f = step*0.1;
@@ -27,9 +29,11 @@
   // orientation 90 = fat end left; a negative slope raises the fat (left) end.
   // The engine solves where each leaf's thread must tie (its attach point) so that
   // the leaf, with its children's weights, really hangs at that tilt. See the build sheet.
+  // It also increases bend as it goes down.
   function leaf(id, level, size, color, kids){
+    const bend = BEND_TOP + (BEND_BOT - BEND_TOP) * (level / 3);
     return { id:id, type:'shape', shape:'ovate', size:size, color:color,
-             orientation:90, targetSlope:-TILT*level, bend:BEND, bendAxis:90,
+             orientation:90, targetSlope:-TILT*level, bend:bend, bendAxis:90,
              children:kids };
   }
   // fat end of a size-s leaf is at flat (0, s); the tip is at (0, -s)
