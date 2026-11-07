@@ -1,7 +1,7 @@
 /* ============================================================
    MOBILE STUDIO — shared engine
    Include this after mobile-engine.css, then call:
-     MobileEngine.start({ title, string, root });
+     MobileEngine.start({ title, string, root, hideJoints? });
    from your mobile's own small HTML file.
    ------------------------------------------------------------
    SCHEMA
@@ -28,6 +28,13 @@
        (bent shapes with no `tilt` hang hump-up from their attach point; give
         `tilt` in radians to override. A child may use `at:[x,y]` to hang from a
         specific point on this shape instead of offset/anchorY.)
+       slope:<degrees, rotation about the view axis applied after the panel's pose
+             (before it spins): positive raises the right-hand end. default 0.
+             'auto' = computed from physics (see "hanging equilibrium")>,
+       targetSlope:<degrees, desired tilt; the engine solves `attach` along the
+             shape's y axis to achieve it (physical equilibrium)>,
+       id:<optional name shown in the build sheet>,
+   Spec option buildSheet:true shows a table of sizes, weights, hang points.
        bendAxis:<degrees, direction (in the shape's own plane) along which it
              curves; 0 = curves left-right, 90 = curves top-bottom. default 0> }
 
@@ -295,6 +302,8 @@ function shapeFrame(node){
   const cA=Math.cos(A), sA=Math.sin(A);
   const cr=Math.cos(roll), sr=Math.sin(roll);
   const cp=Math.cos(pitch), sp=Math.sin(pitch);
+  const slopeDeg = node._slopeDeg !== undefined ? node._slopeDeg : (typeof node.slope === 'number' ? node.slope : 0);
+  const slope = slopeDeg*Math.PI/180, cs=Math.cos(slope), ss=Math.sin(slope);
   const cy=Math.cos(yaw), sy=Math.sin(yaw);
   const ce=Math.cos(CAM_ELEV), se=Math.sin(CAM_ELEV);
 
@@ -304,9 +313,15 @@ function shapeFrame(node){
     if(Math.abs(kappa) > 1e-6){ ub = Math.sin(kappa*u)/kappa; z = (1-Math.cos(kappa*u))/kappa; }
     return [ub*cA - v*sA, ub*sA + v*cA, z];
   }
-  function rollPitch(p){
+  function rollPitch0(p){ // pose without slope: hanging attitude of the panel
     const x1 = p[0]*cr - p[1]*sr, y1 = p[0]*sr + p[1]*cr, z1 = p[2];
     return [x1, y1*cp - z1*sp, y1*sp + z1*cp];
+  }
+  function rollPitch(p){
+    const q = rollPitch0(p), x2 = q[0], y2 = q[1], z2 = q[2];
+    // SLOPE: rotate about the view axis, in the panel's own frame (before spin),
+    // so a hanging panel can lean sideways. positive = right end up.
+    return [x2*cs + y2*ss, -x2*ss + y2*cs, z2];
   }
   function yawCam(p){ // spin about the vertical string, then camera elevation
     const x3 = p[0]*cy + p[2]*sy, z3 = -p[0]*sy + p[2]*cy, y3 = p[1];
@@ -318,13 +333,111 @@ function shapeFrame(node){
     const p = rollPitch(bendPoint(x,y));
     return yawCam([p[0]-A3[0], p[1]-A3[1], p[2]-A3[2]]); // attach point -> origin = string end
   };
-  return { kappa, cA, sA, orient, point };
+  // raw(x,y): flat point -> physical position (x right, y DOWN, z toward viewer),
+  // before slope, spin and camera. Used to solve the hanging equilibrium.
+  const raw = (x,y)=> rollPitch0(bendPoint(x,y));
+  return { kappa, cA, sA, orient, point, raw };
 }
 
 function shadePct(n){ // world normal -> lighten/darken percent (two-sided)
   if(n[2] < 0) n = [-n[0],-n[1],-n[2]];
   const d = Math.max(0, n[0]*LIGHT[0] + n[1]*LIGHT[1] + n[2]*LIGHT[2]);
   return (0.3 + 0.7*d - L_REST) * 90;
+}
+
+/* ---------------- hanging equilibrium ----------------
+   A panel hangs from one point H. Strings from its children pull straight
+   down at their attach points, and its own weight acts at its centre of
+   mass. In the panel's own vertical plane, with X right and Y down measured
+   from H, torque balance after tilting by theta (right end up = +theta) is
+        sum m*(X*cos(theta) + Y*sin(theta)) = 0
+   =>   theta = atan2( -sum m*X , sum m*Y ).
+   It is a stable hang only when the masses are below H (sum m*Y > 0): that
+   is why a bent panel hung from the top of its arch tilts and settles.
+     slope:'auto'      -> tilt is computed from the shape's `attach` point.
+     targetSlope:<deg> -> the tilt you want; the engine solves where along the
+                          shape's y axis (its line of symmetry) `attach` must
+                          be to get it, and reports that for building. */
+function pointInPoly(pts, x, y){
+  let inside = false;
+  for(let i=0,j=pts.length-1;i<pts.length;j=i++){
+    const [xi,yi]=pts[i], [xj,yj]=pts[j];
+    if(((yi>y)!==(yj>y)) && (x < (xj-xi)*(y-yi)/(yj-yi)+xi)) inside = !inside;
+  }
+  return inside;
+}
+
+function childFlatPoint(node, c){
+  return c.at ? c.at : [c.offset, (c.anchorY !== undefined ? c.anchorY : 1) * node.size];
+}
+
+function solveHang(node){
+  const fr = shapeFrame(node);
+  const outline = node._outline || (node._outline = outlinePoints(node.shape, node.size));
+  // centre of mass of the (bent) sheet: average over a grid inside the outline
+  let cx=0, cy=0, cz=0, n=0;
+  const S = node.size, G = 48;
+  for(let i=0;i<G;i++) for(let j=0;j<G;j++){
+    const x = -S*1.3 + 2.6*S*(i+0.5)/G, y = -S*1.3 + 2.6*S*(j+0.5)/G;
+    if(!pointInPoly(outline, x, y)) continue;
+    const r = fr.raw(x,y); cx+=r[0]; cy+=r[1]; cz+=r[2]; n++;
+  }
+  const masses = [{m:node.weight, r:[cx/n, cy/n, cz/n]}];
+  for(const c of (node.children||[])){
+    const q = childFlatPoint(node, c);
+    masses.push({m:massOf(c.node), r:fr.raw(q[0], q[1])});
+  }
+  const ax = (node.attach||[0,0])[0];
+  function eq(h){
+    const H = fr.raw(ax, h);
+    let sx=0, sy=0;
+    for(const k of masses){ sx += k.m*(k.r[0]-H[0]); sy += k.m*(k.r[1]-H[1]); }
+    return {theta: Math.atan2(-sx, sy)*180/Math.PI, stable: sy > 0};
+  }
+  let h = (node.attach||[0,0])[1];
+  if(node.targetSlope !== undefined){
+    const T = node.targetSlope, STEPS = 600;
+    let prev = null, found = null;
+    for(let i=0;i<=STEPS;i++){
+      const hh = -S + 2*S*i/STEPS, e = eq(hh);
+      if(e.stable && prev && prev.e.stable && (prev.e.theta-T)*(e.theta-T) <= 0){
+        const cand = {lo:prev.h, hi:hh};
+        if(!found || Math.abs(hh) < Math.abs(found.hi)) found = cand;
+      }
+      prev = {h:hh, e};
+    }
+    if(found){
+      let lo = found.lo, hi = found.hi;
+      const flo = eq(lo).theta - T;
+      for(let k=0;k<50;k++){
+        const mid = (lo+hi)/2, fm = eq(mid).theta - T;
+        if(fm*flo <= 0) hi = mid; else lo = mid;
+      }
+      h = (lo+hi)/2;
+    } else {
+      console.warn('No stable hang point gives slope', T, 'for a shape of size', node.size);
+    }
+    node.attach = [ax, h];
+  }
+  const e = eq(h);
+  node._slopeDeg = e.theta;
+  if(!e.stable) console.warn('Unstable hang (masses above the hang point) for a shape of size', node.size);
+}
+
+function resolveTilts(node){
+  for(const c of (node.children||[])) resolveTilts(c.node);
+  if(node.type === 'shape' && (node.slope === 'auto' || node.targetSlope !== undefined)) solveHang(node);
+}
+
+// One line per shape: what you need to cut and where to tie the thread.
+function buildSheet(node, rows){
+  if(node.type === 'shape'){
+    const s = node.size, h = (node.attach||[0,0])[1];
+    rows.push({ id: node.id || node.shape, size: s, weight: node.weight,
+                fromEnd: s - h, fromOther: s + h, tilt: node._slopeDeg || 0 });
+  }
+  for(const c of (node.children||[])) buildSheet(c.node, rows);
+  return rows;
 }
 
 // Sutherland-Hodgman clip of a polygon to the half-plane f(x,y) >= 0 (f linear).
@@ -393,7 +506,7 @@ function drawShapeSelf(parentGroup, defs, node, worldX, worldY, depth){
       g.appendChild(poly);
     }
   }
-  g.appendChild(el('circle', {cx:0, cy:0, r:2.6, fill:'var(--steel)'}));
+  if(!HIDE_JOINTS) g.appendChild(el('circle', {cx:0, cy:0, r:2.6, fill:'var(--steel)'}));
   parentGroup.appendChild(g);
 }
 
@@ -411,6 +524,7 @@ function drawRodSelf(parentGroup, node, worldX, worldY, yaw, lean){
 }
 
 let hitList = [];
+let HIDE_JOINTS = false; // spec.hideJoints: don't draw the dots where strings meet shapes
 function drawNode(parentGroup, defs, node, worldX, worldY, depth){
   depth = depth || 0;
   const yaw = node._yaw || 0, lean = node._lean || 0, pivot = node._pivot || 0;
@@ -429,7 +543,7 @@ function drawNode(parentGroup, defs, node, worldX, worldY, depth){
       const p = project(c.offset - pivot, lean, yaw);
       ax = worldX + p.dx; ay = worldY + p.dy; childDepth = depth + p.z;
     }
-    parentGroup.appendChild(el('circle', {cx:ax, cy:ay, r:2.6, fill:'var(--steel)'}));
+    if(!HIDE_JOINTS) parentGroup.appendChild(el('circle', {cx:ax, cy:ay, r:2.6, fill:'var(--steel)'}));
     const childWorldY = ay + c.string;
     parentGroup.appendChild(el('line', {x1:ax, y1:ay, x2:ax, y2:childWorldY, stroke:'var(--string)', 'stroke-width':1.4}));
     drawNode(parentGroup, defs, c.node, ax, childWorldY, childDepth);
@@ -472,13 +586,27 @@ function buildDOM(spec){
 
 /* ---------------- entry point ---------------- */
 function start(spec){
+  HIDE_JOINTS = !!spec.hideJoints;
   resolveWeights(spec.root);
+  resolveTilts(spec.root);
   initPhysics(spec.root);
 
   const svg = buildDOM(spec);
   document.getElementById('placardTitle').textContent = spec.title || 'Untitled';
   document.getElementById('placardMeta').textContent =
     `${countShapes(spec.root)} elements \u00b7 hand-balanced \u00b7 2026`;
+
+  if(spec.buildSheet){
+    const rows = buildSheet(spec.root, []);
+    const f = v=>v.toFixed(1);
+    const sheet = document.createElement('div');
+    sheet.id = 'sheet';
+    sheet.innerHTML = '<p class="title">Build sheet</p><table><tr><th>leaf</th><th>length</th><th>wt</th><th>hang from fat end</th><th>tilt</th></tr>' +
+      rows.map(r=>`<tr><td>${r.id}</td><td>${f(r.size*2)}</td><td>${f(r.weight)}</td><td>${f(r.fromEnd)}</td><td>${f(Math.abs(r.tilt))}\u00b0</td></tr>`).join('') +
+      '</table><p class="meta">length = tip to base; hang = distance along the leaf from the base end to where the thread ties (same units as length)</p>';
+    document.body.appendChild(sheet);
+    console.table(rows);
+  }
 
   let layer, defs;
   function rebuildScene(){
