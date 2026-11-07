@@ -6,12 +6,12 @@ window.MOBILE = {
   root: {
     type: 'rod',
     children: [
-      // flat triangle hung from its top vertex, thread hanging off its base
+      // flat triangle hung from its top vertex, thread hanging off its base (y = 0.8*size)
       { offset: -170, string: 50, node: {
           type:'shape', shape:'triangle', size:38, color:'var(--black-shape)',
           attach: [0,-38],
           children: [
-            { offset: 6, string: 55, anchorY: 1, node: {
+            { at: [6, 30.4], string: 55, node: {
                 type:'shape', shape:'disc', size:14, color:'var(--yellow)'
             }}
           ]

@@ -322,6 +322,21 @@ function shadePct(n){ // world normal -> lighten/darken percent (two-sided)
   return (0.3 + 0.7*d - L_REST) * 90;
 }
 
+// Sutherland-Hodgman clip of a polygon to the half-plane f(x,y) >= 0 (f linear).
+function clipPoly(pts, f){
+  const out = [];
+  for(let i=0;i<pts.length;i++){
+    const a = pts[i], b = pts[(i+1)%pts.length];
+    const fa = f(a[0],a[1]), fb = f(b[0],b[1]);
+    if(fa >= 0) out.push(a);
+    if((fa >= 0) !== (fb >= 0)){
+      const t = fa/(fa-fb);
+      out.push([a[0]+(b[0]-a[0])*t, a[1]+(b[1]-a[1])*t]);
+    }
+  }
+  return out;
+}
+
 function drawShapeSelf(parentGroup, defs, node, worldX, worldY, depth){
   const fr = shapeFrame(node);
   node._frame = fr; // children's attach points use the same transform
@@ -330,45 +345,49 @@ function drawShapeSelf(parentGroup, defs, node, worldX, worldY, depth){
 
   const depthScale = 1 + Math.max(-0.18, Math.min(0.18, -depth*0.0009));
   const g = el('g', {transform:`translate(${worldX},${worldY}) scale(${depthScale})`});
-  const pts = outline.map(([x,y])=>{ const p = fr.point(x,y); return p[0].toFixed(2)+','+p[1].toFixed(2); }).join(' ');
-  const poly = el('polygon', {points:pts});
-
   const baseFill = resolveColor(node.color);
-  let fill;
+  const strokeCol = baseFill === resolveColor('var(--white-shape)') ? '#1a1a1a' : 'none';
+  const opacity = Math.max(0.8, Math.min(1, 1 - depth*0.0006));
+
   if(Math.abs(fr.kappa) < 1e-6){
-    fill = shadeColor(baseFill, shadePct(fr.orient([0,0,1])));
+    const pts = outline.map(([x,y])=>{ const p = fr.point(x,y); return p[0].toFixed(2)+','+p[1].toFixed(2); }).join(' ');
+    const poly = el('polygon', {points:pts});
+    poly.setAttribute('fill', shadeColor(baseFill, shadePct(fr.orient([0,0,1]))));
+    poly.setAttribute('stroke', strokeCol);
+    poly.setAttribute('stroke-width', '1.2');
+    poly.setAttribute('stroke-linejoin', 'round');
+    poly.setAttribute('opacity', opacity);
+    g.appendChild(poly);
   } else {
-    // Shading varies only along the bend direction: sample the true normal
-    // along the panel's centerline and lay it out as a screen-space gradient.
+    // A bent card is drawn as a stack of narrow strips cut across the bend
+    // direction. Each strip is (nearly) planar, so it gets its own true
+    // Lambert shade, and strips are painted far-to-near so the front of the
+    // card correctly hides its back instead of the outline folding over itself.
     let umin = Infinity, umax = -Infinity;
     for(const [x,y] of outline){ const u = x*fr.cA + y*fr.sA; if(u<umin) umin=u; if(u>umax) umax=u; }
-    const N = 14, S = [];
-    for(let i=0;i<=N;i++){
-      const u = umin + (umax-umin)*i/N;
-      const c = fr.point(u*fr.cA, u*fr.sA);
-      const ks = fr.kappa*u;
+    const N = 28, strips = [];
+    for(let i=0;i<N;i++){
+      const u0 = umin + (umax-umin)*i/N, u1 = umin + (umax-umin)*(i+1)/N;
+      let poly = clipPoly(outline, (x,y)=> (x*fr.cA + y*fr.sA) - u0);
+      poly = clipPoly(poly, (x,y)=> u1 - (x*fr.cA + y*fr.sA));
+      if(poly.length < 3) continue;
+      const mp = poly.map(([x,y])=> fr.point(x,y));
+      const zc = mp.reduce((a,q)=>a+q[2],0) / mp.length;
+      const um = (u0+u1)/2, ks = fr.kappa*um;
       const n = fr.orient([-Math.sin(ks)*fr.cA, -Math.sin(ks)*fr.sA, Math.cos(ks)]);
-      S.push({x:c[0], y:c[1], pct:shadePct(n)});
+      strips.push({mp, zc, col: shadeColor(baseFill, shadePct(n))});
     }
-    const dx = S[N].x - S[0].x, dy = S[N].y - S[0].y, len2 = dx*dx + dy*dy;
-    if(len2 < 4){ // seen edge-on: gradient degenerates, use a single tone
-      fill = shadeColor(baseFill, S[N>>1].pct);
-    } else {
-      const id = 'panel' + (gradientCounter++);
-      const grad = el('linearGradient', {id, gradientUnits:'userSpaceOnUse', x1:S[0].x, y1:S[0].y, x2:S[N].x, y2:S[N].y});
-      const stops = S.map(s=>({t:Math.max(0,Math.min(1,((s.x-S[0].x)*dx + (s.y-S[0].y)*dy)/len2)), pct:s.pct}))
-                     .sort((a,b)=>a.t-b.t);
-      for(const s of stops) grad.appendChild(el('stop', {offset:s.t.toFixed(4), 'stop-color':shadeColor(baseFill, s.pct)}));
-      defs.appendChild(grad);
-      fill = `url(#${id})`;
+    strips.sort((a,b)=>a.zc-b.zc); // far first
+    for(const st of strips){
+      const poly = el('polygon', {points: st.mp.map(q=>q[0].toFixed(2)+','+q[1].toFixed(2)).join(' ')});
+      poly.setAttribute('fill', st.col);
+      poly.setAttribute('stroke', st.col); // hides hairline seams between strips
+      poly.setAttribute('stroke-width', '0.8');
+      poly.setAttribute('stroke-linejoin', 'round');
+      poly.setAttribute('opacity', opacity);
+      g.appendChild(poly);
     }
   }
-  poly.setAttribute('fill', fill);
-  poly.setAttribute('stroke', baseFill === resolveColor('var(--white-shape)') ? '#1a1a1a' : 'none');
-  poly.setAttribute('stroke-width', '1.2');
-  poly.setAttribute('stroke-linejoin', 'round');
-  poly.setAttribute('opacity', Math.max(0.8, Math.min(1, 1 - depth*0.0006)));
-  g.appendChild(poly);
   g.appendChild(el('circle', {cx:0, cy:0, r:2.6, fill:'var(--steel)'}));
   parentGroup.appendChild(g);
 }
