@@ -13,7 +13,7 @@
        pivot: <number|undefined> }   // local x of hang point; omit to auto-balance
 
    "shape" node:
-     { type:'shape', shape:'disc'|'blob'|'crescent'|'diamond'|'leaf'|'triangle',
+     { type:'shape', shape:'disc'|'blob'|'crescent'|'diamond'|'leaf'|'ovate'|'triangle'|'rect',
        size:<number>, color:'#hex', weight:<number|undefined>, // omit weight to auto-derive from area
        density:<number optional>,    // material density used only when weight is omitted
        orientation:<degrees, static in-plane rotation, default 0>,
@@ -54,6 +54,11 @@ function shapeDef(shape, size){
       const r = size;
       return {kind:'path', d:`M ${-r*0.2} ${-r} A ${r} ${r} 0 1 0 ${-r*0.2} ${r} A ${r*0.78} ${r*0.78} 0 1 1 ${-r*0.2} ${-r} Z`};
     }
+    case 'ovate': // asymmetric leaf: pointed tip at y=-size, fat rounded end at y=+size, axis of symmetry = y axis
+      return {kind:'path', d:`M 0 ${-size} C ${size*0.25} ${-size*0.45}, ${size*0.78} ${-size*0.05}, ${size*0.62} ${size*0.5}
+                 C ${size*0.52} ${size*0.88}, ${size*0.22} ${size}, 0 ${size}
+                 C ${-size*0.22} ${size}, ${-size*0.52} ${size*0.88}, ${-size*0.62} ${size*0.5}
+                 C ${-size*0.78} ${-size*0.05}, ${-size*0.25} ${-size*0.45}, 0 ${-size} Z`};
     case 'leaf':
       return {kind:'path', d:`M 0 ${-size} C ${size*1.1} ${-size*0.4}, ${size*1.1} ${size*0.4}, 0 ${size} C ${-size*1.1} ${size*0.4}, ${-size*1.1} ${-size*0.4}, 0 ${-size} Z`};
     case 'blob':
