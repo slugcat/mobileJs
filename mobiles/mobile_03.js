@@ -19,7 +19,7 @@
   const TILT = 23;               // extra degrees of tilt per level, rounded end rising
   // dark green, each step lighter: parent < big child < small child (< its own children ...)
   function green(step){
-    const base = [23,64,42], f = step*0.075;
+    const base = [12,38,24], f = step*0.1;
     return '#' + base.map(v=>Math.round(v+(255-v)*f).toString(16).padStart(2,'0')).join('');
   }
   const FAT = 0.64, TIP = 0.5;   // child size as a fraction of its parent
