@@ -14,6 +14,33 @@
              |-- L0221 (large, terminal) from L022's fat end
              '-- L0222 (small, terminal) from L022's pointed end
    (The schematic ends at L0222, so it has no children.) */
+
+const shapeMat = {
+  material: 'balsa',
+  grade: 'medium',
+  thicknessMm: 1.588,      // 1/16" sheet
+  layers: 2,               // 2 layers glued with PVA to hold curve
+  crossGrainLayers: false,
+  glueType: 'pva',
+  grainAngleDeg: 90,
+  holeReinforced: true,    // CA-hardened pinholes
+  minEdgeMarginMm: 3.0,
+  finishCoatGPerM2: 20
+};
+
+const rodMat = {
+  material: 'pine',
+  diameterMm: 3.175,       // 1/8" dowel
+  attachmentMethod: 'groove_tied',
+  maxDeflectionRatio: 0.01
+};
+
+const threadMat = {
+  material: 'cotton_glace', // or 'nylon_monofilament' with diameterMm: 0.14 (2 lb test)
+  diameterMm: 0.25,
+  safetyFactor: 4.0
+};
+
 (function(){
   const BEND_TOP = 1.0;
   const BEND_BOT = 1.25;
@@ -37,6 +64,7 @@
              children:kids };
   }
 
+
   const FAT_ATTACH = 0.90; // inset 5% of total leaf length (0.10*s) from base edge
   const TIP_ATTACH = -0.82; // inset 9% of total leaf length (0.18*s) from pointed tip
   const fat = (s, str, node) => ({ at:[0, s * FAT_ATTACH], string:str, node:node });
@@ -46,11 +74,13 @@
   const s021 = s02*FAT, s022 = s02*TIP;
   const s0221 = s022*FAT, s0222 = s022*TIP;
 
+
   window.MOBILE = {
     title: "Untitled (Study No. 3)",
     string: 60,
     buildSheet: true,
     hideJoints: true,   // no dots where strings meet leaves
+    mmPerUnit: 2.0,
     root: leaf('L0', 0, s0, green(0), [
       fat(s0, 80, leaf('L01', 1, s01, green(1), [])),
       tip(s0, 80, leaf('L02', 1, s02, green(2), [
