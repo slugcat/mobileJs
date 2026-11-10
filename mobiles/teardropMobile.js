@@ -22,6 +22,7 @@ const shapeMat = {
   layers: 2,               // 2 layers glued with PVA to hold curve
   crossGrainLayers: false,
   glueType: 'pva',
+  warmWetBent: true,
   grainAngleDeg: 90,
   holeReinforced: true,    // CA-hardened pinholes
   minEdgeMarginMm: 3.0,
@@ -76,7 +77,7 @@ const threadMat = {
 
 
   window.MOBILE = {
-    title: "Untitled (Study No. 3)",
+    title: "teardrop shapes curved down, curve axis perpendicular line between point and rounnd end, shades of green",
     string: 60,
     buildSheet: true,
     hideJoints: true,   // no dots where strings meet leaves

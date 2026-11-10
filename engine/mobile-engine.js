@@ -54,7 +54,12 @@
    1. `shapeMat` (Sheet Material & Lamination Parameters):
      {
        material: <'balsa'|'basswood'|'birch_ply', default 'balsa'>,
+              // !! for any wood:
+              // Pre-bend the wet plies on the cylinder until dry so they hold the 24mm radius stress-free.
+              // Apply PVA glue between the pre-curved plies and clamp them back onto the cylinder.
+              // This is what is meant by warmWetBent == true.
        grade: <'soft'|'medium'|'hard', default 'medium'>,
+
               // balsa density: soft=100, medium=160 (craft store), hard=220 kg/m^3
        thicknessMm: <number, default 1.588>,
               // single-layer sheet thickness in mm (1.588 = 1/16", 2.38 = 3/32", 3.175 = 1/8")
@@ -66,7 +71,7 @@
               // adhesive mass & stiffness (pva=35, ca=20, epoxy=60 g/m^2 per glue line)
        grainAngleDeg: <number, default 90>,
               // wood grain direction in shape's flat coords (90 = along y-axis, 0 = along x-axis)
-       steamBent: <boolean, default false>,
+       warmWetBent: <boolean, default true>,
               // true if steamed/water-formed (relaxes outer-fiber fracture strain limit by 1.85x)
        holeReinforced: <boolean, default false>,
               // true if pinholes are hardened with thin CA glue or micro-grommets (2.8x tear-out)
@@ -719,7 +724,7 @@ function normalizeMaterialParams(spec, shapeArg, rodArg, threadArg, optionsArg){
     glueArealGPerM2: sIn.glueArealGPerM2 !== undefined ? sIn.glueArealGPerM2 : glueSpec.arealGPerM2,
     stiffnessBoost: glueSpec.stiffnessBoost,
     grainAngleDeg: sIn.grainAngleDeg !== undefined ? sIn.grainAngleDeg : 90, // default along shape Y-axis
-    steamBent: !!sIn.steamBent,
+    warmWetBent: !!sIn.warmWetBent,
     holeReinforced: !!sIn.holeReinforced,
     minEdgeMarginMm: sIn.minEdgeMarginMm !== undefined ? sIn.minEdgeMarginMm : 3.0,
     finishCoatGPerM2: sIn.finishCoatGPerM2 !== undefined ? sIn.finishCoatGPerM2 : 20
@@ -840,12 +845,16 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
         const radiusMm = sizeMm / bendRad;
         const bendAxisDeg = node.bendAxis || 0;
         const grainDeltaRad = ((bendAxisDeg - S.grainAngleDeg) * Math.PI) / 180;
-        const E_bend = effectiveWoodModulus(grainDeltaRad);
 
-        // Outer fiber strain during forming depends on single-layer thickness
+        // During forming over a cylinder, each single ply bends before glue cures,
+        // and wet/steam forming plasticizes lignin (reducing forming modulus by ~65%).
+        const c2 = Math.cos(grainDeltaRad)**2, s2 = Math.sin(grainDeltaRad)**2;
+        const E_singlePly = (S.E_L_MPa * S.E_T_MPa) / (S.E_L_MPa * s2 + S.E_T_MPa * c2);
+        const E_forming = E_singlePly * (S.warmWetBent ? 0.35 : 1.0);
+
         const outerStrain = S.thicknessMm / (2 * radiusMm);
-        const formingStressMPa = E_bend * outerStrain;
-        const maxFormingStressMPa = S.sigmaBendMPa * (S.steamBent ? 1.85 : 1.0) * (Math.cos(grainDeltaRad)**2 + 0.25 * Math.sin(grainDeltaRad)**2);
+        const formingStressMPa = E_forming * outerStrain;
+        const maxFormingStressMPa = S.sigmaBendMPa * (S.warmWetBent ? 1.85 : 1.0) * (c2 + 0.25 * s2);
 
         if(formingStressMPa > maxFormingStressMPa){
           addIssue('ERROR', 'shape_bending_fracture', nodeId,
