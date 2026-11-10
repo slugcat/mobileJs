@@ -21,7 +21,7 @@ TEMPLATE = """<!DOCTYPE html>
 </script>
 <script>
 {spec}
-MobileEngine.start(window.MOBILE);
+MobileEngine.start(window.MOBILE, shapeMat, rodMat, threadMat);
 </script>
 </body>
 </html>
