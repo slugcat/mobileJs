@@ -834,6 +834,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
       const glueMassGrams = areaM2 * Math.max(0, S.layers - 1) * S.glueArealGPerM2;
       const finishMassGrams = areaM2 * 2 * S.finishCoatGPerM2;
       selfMassGrams = woodMassGrams + glueMassGrams + finishMassGrams;
+      node._selfMassGrams = selfMassGrams; // <-- store physical mass in grams for buildSheet
 
       const totalMassGrams = selfMassGrams + childrenMassGrams;
       const totalLoadN = (totalMassGrams * 1e-3) * g_accel;
@@ -1185,14 +1186,21 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
   return report;
 }
 
-// One line per shape: what you need to cut and where to tie the thread.
-function buildSheet(node, rows){
+// One line per shape: physical dimensions to cut and where to tie the thread.
+function buildSheet(node, rows, mmPerUnit){
+  mmPerUnit = mmPerUnit || 2.0;
   if(node.type === 'shape'){
     const s = node.size, h = (node.attach||[0,0])[1];
-    rows.push({ id: node.id || node.shape, size: s, weight: node.weight,
-                fromEnd: s - h, fromOther: s + h, tilt: node._slopeDeg || 0 });
+    rows.push({
+      id: node.id || node.shape,
+      lengthMm: s * 2 * mmPerUnit,
+      weightG: node._selfMassGrams !== undefined ? node._selfMassGrams : node.weight,
+      fromEndMm: (s - h) * mmPerUnit,
+      fromOtherMm: (s + h) * mmPerUnit,
+      tiltDeg: node._slopeDeg || 0
+    });
   }
-  for(const c of (node.children||[])) buildSheet(c.node, rows);
+  for(const c of (node.children||[])) buildSheet(c.node, rows, mmPerUnit);
   return rows;
 }
 
@@ -1437,13 +1445,33 @@ function start(spec, shapeMat, rodMat, threadMat){
     `${countShapes(spec.root)} elements · ${verification.physicalTotals.totalMassGrams.toFixed(1)} g · Verify: ${verification.status}`;
 
   if(spec.buildSheet){
-    const rows = buildSheet(spec.root, []);
-    const f = v=>v.toFixed(1);
+    const mmPerUnit = verification.materialsUsed.mmPerUnit;
+    const rows = buildSheet(spec.root, [], mmPerUnit);
+    const f1 = v => v.toFixed(1);
+    const f2 = v => v.toFixed(2);
     const sheet = document.createElement('div');
     sheet.id = 'sheet';
-    sheet.innerHTML = '<p class="title">Build sheet</p><table><tr><th>leaf</th><th>length</th><th>wt</th><th>hang from fat end</th><th>tilt</th></tr>' +
-      rows.map(r=>`<tr><td>${r.id}</td><td>${f(r.size*2)}</td><td>${f(r.weight)}</td><td>${f(r.fromEnd)}</td><td>${f(Math.abs(r.tilt))}°</td></tr>`).join('') +
-      '</table><p class="meta">length = tip to base; hang = distance along the leaf from the base end to where the thread ties (same units as length)</p>';
+    sheet.innerHTML =
+      '<p class="title">Build sheet</p>' +
+      '<table>' +
+        '<tr>' +
+          '<th>leaf</th>' +
+          '<th>length (mm)</th>' +
+          '<th>wt (g)</th>' +
+          '<th>hang from fat end (mm)</th>' +
+          '<th>tilt (deg)</th>' +
+        '</tr>' +
+        rows.map(r =>
+          `<tr>` +
+            `<td>${r.id}</td>` +
+            `<td>${f1(r.lengthMm)}</td>` +
+            `<td>${f2(r.weightG)}</td>` +
+            `<td>${f1(r.fromEndMm)}</td>` +
+            `<td>${f1(Math.abs(r.tiltDeg))}°</td>` +
+          `</tr>`
+        ).join('') +
+      '</table>' +
+      `<p class="meta">scale = ${mmPerUnit} mm/unit; length = tip to base (mm); wt = physical mass including wood, glue &amp; finish (g); hang = distance along the leaf from the base end to where the thread ties (mm)</p>`;
     document.body.appendChild(sheet);
     console.table(rows);
   }
