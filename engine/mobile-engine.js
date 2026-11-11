@@ -14,8 +14,8 @@
 
    "shape" node:
      { type:'shape', shape:'disc'|'blob'|'crescent'|'diamond'|'leaf'|'ovate'|'triangle'|'rect',
-       size:<number>, color:'#hex', weight:<number|undefined>, // omit weight to auto-derive from area
-       density:<number optional>,    // material density used only when weight is omitted
+       size:<number>, color:'#hex', weight:<number|undefined>, // grams; omit to derive from area x thickness x density (shapeMat)
+       density:<number optional>,    // mass per unit area (g/unit^2); overrides the material-derived mass when weight is omitted
        orientation:<degrees, static in-plane rotation, default 0>,
        tilt:<radians, static panel pitch (foreshortens vertically), default 0>,
        bend:<-1.5..1.5, real out-of-plane curvature: total turning angle (radians)
@@ -23,7 +23,7 @@
              edges (one-axis cylinder bend, not a saddle). + cups toward viewer,
              - bows away. default 0 = flat>,
        attach:<[x,y] in the flat shape's own coords where the hanging string meets
-             it; default [0,0] = center. The shape spins about the vertical line
+             it; default [0,0] = center (crescent: its centre of mass, inside its body). The shape spins about the vertical line
              through this point.>,
        (bent shapes with no `tilt` hang hump-up from their attach point; give
         `tilt` in radians to override. A child may use `at:[x,y]` to hang from a
@@ -71,8 +71,9 @@
               // adhesive mass & stiffness (pva=35, ca=20, epoxy=60 g/m^2 per glue line)
        grainAngleDeg: <number, default 90>,
               // wood grain direction in shape's flat coords (90 = along y-axis, 0 = along x-axis)
-       warmWetBent: <boolean, default true>,
-              // true if steamed/water-formed (relaxes outer-fiber fracture strain limit by 1.85x)
+       warmWetBent: <boolean, default false>,
+              // true if steamed/water-formed (relaxes outer-fiber fracture strain limit by 1.85x, counted once);
+              // off by default so the verifier never assumes a forming process you did not declare
        holeReinforced: <boolean, default false>,
               // true if pinholes are hardened with thin CA glue or micro-grommets (2.8x tear-out)
        minEdgeMarginMm: <number, default 3.0>,
@@ -141,6 +142,8 @@
 const DEFAULT_AREAL_DENSITY = 0.0016; // weight per unit area when a shape omits `weight`
 const DEFAULT_CAM_ELEV = 0.3;         // default camera elevation in radians (~17 deg above)
 let camElev = DEFAULT_CAM_ELEV;       // live camera elevation controlled by right-hand slider
+const SF_FAIL = 1.5;                  // ERROR below this safety factor on any strength check (WARN below the design factor)
+const EDGE_EPS_MM = 0.1;              // a hole within this distance of the cut edge counts as ON the edge
 
 /* ---------------- material catalogs & presets ---------------- */
 const MATERIAL_PRESETS = {
@@ -269,9 +272,13 @@ function shapeDef(shape, size){
       return {kind:'polygon', points:[[0,-size],[size*0.72,0],[0,size],[-size*0.72,0]]};
     case 'triangle':
       return {kind:'polygon', points:[[0,-size],[size,size*0.8],[-size,size*0.8]]};
-    case 'crescent': {
-      const r = size;
-      return {kind:'path', d:`M ${-r*0.2} ${-r} A ${r} ${r} 0 1 0 ${-r*0.2} ${r} A ${r*0.78} ${r*0.78} 0 1 1 ${-r*0.2} ${-r} Z`};
+    case 'crescent': { // outer circle (r) minus an offset inner circle (0.78r); horns point right
+      const r = size, ri = 0.78*r, c = 0.42*r;
+      const xh = (r*r - ri*ri + c*c) / (2*c), yh = Math.sqrt(r*r - xh*xh); // where the two circles meet
+      const al = Math.atan2(yh, xh), be = Math.atan2(yh, xh - c), N = 72, pts = [];
+      for(let i=0;i<=N;i++){ const a = al + (2*Math.PI - 2*al)*i/N; pts.push([r*Math.cos(a), r*Math.sin(a)]); }
+      for(let i=1;i<N;i++){ const a = (2*Math.PI - be) - (2*Math.PI - 2*be)*i/N; pts.push([c + ri*Math.cos(a), ri*Math.sin(a)]); }
+      return {kind:'polygon', points:pts};
     }
     case 'ovate': // asymmetric leaf: pointed tip at y=-size, fat rounded end at y=+size, axis of symmetry = y axis
       return {kind:'path', d:`M 0 ${-size} C ${size*0.25} ${-size*0.45}, ${size*0.78} ${-size*0.05}, ${size*0.62} ${size*0.5}
@@ -297,57 +304,156 @@ function shoelace(pts){
   return Math.abs(s)/2;
 }
 
-// hidden scratch <svg><path> used to measure the area of curved (bezier) shapes
-let scratchPath = null;
-function getScratchPath(){
-  if(scratchPath) return scratchPath;
-  const holder = document.createElementNS('http://www.w3.org/2000/svg','svg');
-  holder.setAttribute('style','position:fixed;width:0;height:0;overflow:hidden;visibility:hidden;');
-  scratchPath = document.createElementNS('http://www.w3.org/2000/svg','path');
-  holder.appendChild(scratchPath);
-  document.body.appendChild(holder);
-  return scratchPath;
-}
-function areaFromPathD(d, samples){
-  samples = samples || 72;
-  const p = getScratchPath();
-  p.setAttribute('d', d);
-  const len = p.getTotalLength();
-  const pts = [];
-  for(let i=0;i<samples;i++){
-    const pt = p.getPointAtLength(len * i / samples);
-    pts.push([pt.x, pt.y]);
+// Pure-JS sampler for the absolute M/L/C/Z path strings above, so area and outline math
+// never need a DOM (verifyMobile runs standalone). Each cubic is flattened, then the polyline
+// is resampled at equal arc-length steps from the path start.
+function samplePathD(d, n){
+  const tok = d.match(/[MLCZ]|-?(?:\d+\.?\d*|\.\d+)(?:e[-+]?\d+)?/gi) || [];
+  const dense = [];
+  let i = 0, cmd = null, cur = [0,0], start = [0,0];
+  const num = ()=> parseFloat(tok[i++]);
+  while(i < tok.length){
+    if(/^[MLCZ]$/i.test(tok[i])) cmd = tok[i++].toUpperCase();
+    else if(cmd === null || cmd === 'Z'){ i++; continue; }
+    if(cmd === 'M'){ cur = [num(), num()]; start = cur; dense.push(cur); cmd = 'L'; }
+    else if(cmd === 'L'){ cur = [num(), num()]; dense.push(cur); }
+    else if(cmd === 'C'){
+      const p0 = cur, p1 = [num(),num()], p2 = [num(),num()], p3 = [num(),num()];
+      for(let k=1;k<=64;k++){
+        const t = k/64, u = 1-t;
+        dense.push([
+          u*u*u*p0[0] + 3*u*u*t*p1[0] + 3*u*t*t*p2[0] + t*t*t*p3[0],
+          u*u*u*p0[1] + 3*u*u*t*p1[1] + 3*u*t*t*p2[1] + t*t*t*p3[1]
+        ]);
+      }
+      cur = p3;
+    }
+    else if(cmd === 'Z'){ dense.push(start); cur = start; }
   }
-  return shoelace(pts);
+  const cum = [0];
+  for(let k=1;k<dense.length;k++) cum.push(cum[k-1] + Math.hypot(dense[k][0]-dense[k-1][0], dense[k][1]-dense[k-1][1]));
+  const total = cum[cum.length-1];
+  const pts = [];
+  let seg = 1;
+  for(let j=0;j<n;j++){
+    const target = total * j / n;
+    while(seg < cum.length-1 && cum[seg] < target) seg++;
+    const span = cum[seg] - cum[seg-1], t = span > 0 ? (target - cum[seg-1]) / span : 0;
+    const a = dense[seg-1], b = dense[seg];
+    pts.push([a[0] + (b[0]-a[0])*t, a[1] + (b[1]-a[1])*t]);
+  }
+  return pts;
 }
 
 // Area of a shape at a given size, in the same square-unit system as `size`.
-// Exact for disc/diamond/triangle; numerically sampled (shoelace on the
-// actual rendered outline) for the curved shapes, so it stays accurate if
-// their path formulas ever change.
+// Exact for disc/polygons; numerically sampled (shoelace on the actual outline) for the
+// bezier shapes, so it stays accurate if their path formulas ever change.
+const areaCache = new Map();
 function areaOfShape(shape, size){
+  const key = shape + '|' + size;
+  if(areaCache.has(key)) return areaCache.get(key);
   const def = shapeDef(shape, size);
-  if(def.kind === 'circle') return Math.PI * def.r * def.r;
-  if(def.kind === 'polygon') return shoelace(def.points);
-  return areaFromPathD(def.d);
+  let a;
+  if(def.kind === 'circle') a = Math.PI * def.r * def.r;
+  else if(def.kind === 'polygon') a = shoelace(def.points);
+  else a = shoelace(samplePathD(def.d, 360));
+  areaCache.set(key, a);
+  return a;
 }
 
-// Derive a plausible weight from a flat cut shape, the way an actual
-// mobile-maker's material would: weight scales with area. `density` is
-// mass per unit area (default tuned so a size-34 disc weighs about 6,
-// matching the original hand-picked example weights). Pass a smaller
-// density for thin wire-hung shapes, larger for heavier stock.
+// Legacy abstract weight: area x mass-per-unit-area. Still used for an explicit per-shape
+// `density`, and as a fallback when no material model is available.
 function weightFromShape(shape, size, density){
   return areaOfShape(shape, size) * (density !== undefined ? density : DEFAULT_AREAL_DENSITY);
 }
 
-// Fill in node.weight for any shape node that omitted it, recursively.
-function resolveWeights(node){
-  if(!node) return;
-  if(node.type === 'shape' && node.weight === undefined){
-    node.weight = weightFromShape(node.shape, node.size, node.density);
+/* ---------------- shared node helpers ---------------- */
+function clampBend(node){ return Math.max(-1.5, Math.min(1.5, node.bend||0)); }
+
+// Static panel pitch; a bent panel with no `tilt` hangs hump-up from its attach point.
+function panelPitch(node){
+  const b = clampBend(node);
+  return node.tilt !== undefined ? node.tilt : (b ? -Math.sign(b)*Math.PI/2 : 0);
+}
+
+// Area centroid of a polygon.
+function polyCentroid(pts){
+  let a = 0, cx = 0, cy = 0;
+  for(let i=0;i<pts.length;i++){
+    const [x1,y1] = pts[i], [x2,y2] = pts[(i+1)%pts.length], w = x1*y2 - x2*y1;
+    a += w; cx += (x1+x2)*w; cy += (y1+y2)*w;
   }
-  for(const c of (node.children || [])) resolveWeights(c.node);
+  return [cx/(3*a), cy/(3*a)];
+}
+
+// Where the hanging string meets the flat shape. The default [0,0] is outside a crescent
+// (it sits in the bite), so a crescent defaults to its own centre of mass, which lies in its body.
+let crescentCentroid = null;
+function attachOf(node){
+  if(node.attach) return node.attach;
+  if(node.shape === 'crescent'){
+    if(!crescentCentroid) crescentCentroid = polyCentroid(shapeDef('crescent', 1).points);
+    return [crescentCentroid[0]*node.size, crescentCentroid[1]*node.size];
+  }
+  return [0,0];
+}
+
+// Local x-extent of a rod: spans its children and the local origin.
+function rodExtent(node){
+  let lo = 0, hi = 0;
+  for(const c of (node.children||[])){ lo = Math.min(lo, c.offset); hi = Math.max(hi, c.offset); }
+  return [lo, hi];
+}
+
+// Stable unique ids, shared by verifier messages and the build sheet. Duplicate `id`s get a suffix.
+function assignIds(root){
+  const used = new Set();
+  let si = 0, ri = 0;
+  (function walk(n){
+    const base = n.id || (n.type === 'shape' ? `${n.shape}_${++si}` : `rod_${++ri}`);
+    let id = base, k = 2;
+    while(used.has(id)) id = `${base}_${k++}`;
+    used.add(id);
+    n._id = id;
+    for(const c of (n.children||[])) walk(c.node);
+  })(root);
+}
+
+/* ---------------- physical masses (grams) ----------------
+   The ONE mass model. A shape's mass is wood + glue lines + finish on both faces
+   (an explicit `weight`, in grams, or a per-area `density` overrides it); a rod's is its dowel.
+   The simulator's balance points and hang solves, the build sheet and the verifier all read
+   node._m, so they cannot drift apart. */
+function shapeMass(node, cfg){
+  const S = cfg.shapes, mm = cfg.mmPerUnit;
+  const areaMm2 = areaOfShape(node.shape, node.size) * mm * mm;
+  const areaM2 = areaMm2 * 1e-6;
+  const wood = areaM2 * (S.totalThicknessMm * 1e-3) * S.densityKgM3 * 1000;
+  const glue = areaM2 * Math.max(0, S.layers - 1) * S.glueArealGPerM2;
+  const finish = areaM2 * 2 * S.finishCoatGPerM2;
+  return { areaMm2, areaM2, wood, glue, finish, total: wood + glue + finish };
+}
+
+function rodMass(node, cfg){
+  const [lo, hi] = rodExtent(node);
+  const lengthMm = (hi - lo) * cfg.mmPerUnit;
+  const area = Math.PI * (cfg.rods.diameterMm / 2) ** 2;
+  return (area * lengthMm * 1e-9) * cfg.rods.densityKgM3 * 1000;
+}
+
+// Set node._m (own mass, grams) on every node. Never writes node.weight, so re-running with
+// different materials always re-derives the masses instead of mistaking them for explicit input.
+function resolveWeights(node, cfg){
+  if(!node) return;
+  if(node.type === 'shape'){
+    if(node.weight !== undefined){ node._m = node.weight; node._massSource = 'weight'; }
+    else if(node.density !== undefined){ node._m = weightFromShape(node.shape, node.size, node.density); node._massSource = 'density'; }
+    else if(cfg){ node._m = shapeMass(node, cfg).total; node._massSource = 'material'; }
+    else { node._m = weightFromShape(node.shape, node.size); node._massSource = 'material'; }
+  } else {
+    node._m = cfg ? rodMass(node, cfg) : 0.6;
+  }
+  for(const c of (node.children || [])) resolveWeights(c.node, cfg);
 }
 
 /* ---------------- color ---------------- */
@@ -393,17 +499,26 @@ const LEAN_MAX = 0.5;
 const SWAY_AMPLITUDE = 0.045;
 const SWAY_FREQ = 0.35;
 
+// Mass of a node plus everything hanging from it. node._m is the node's own mass in GRAMS,
+// set by resolveWeights from the material model (or an explicit weight).
 function massOf(node){
-  let m = node.type === 'shape' ? node.weight : 0.6;
+  let m;
+  if(node._m !== undefined) m = node._m;
+  else if(node.type === 'shape') m = node.weight !== undefined ? node.weight : weightFromShape(node.shape, node.size, node.density);
+  else m = 0.6;
   for(const c of (node.children || [])) m += massOf(c.node);
   return m;
 }
 
-function initPhysics(node){
+// Deterministic part of the physics: total mass, balance pivot, static lean. Safe to re-run any time.
+function computeBalance(node){
   node._mass = massOf(node);
   if(node.type === 'rod'){
+    const [lo, hi] = rodExtent(node), mid = (lo + hi) / 2;
+    const self = node._m !== undefined ? node._m : 0.6;
     if(node.pivot === undefined){
-      let sum = 0, wsum = 0;
+      // true balance point: children plus the dowel's own weight at its midpoint
+      let sum = self * mid, wsum = self;
       for(const c of (node.children||[])){
         const m = massOf(c.node);
         sum += m * c.offset; wsum += m;
@@ -412,20 +527,30 @@ function initPhysics(node){
     } else {
       node._pivot = node.pivot;
     }
-    let imbalance = 0;
+    let imbalance = self * (mid - node._pivot);
     for(const c of (node.children||[])){
       imbalance += massOf(c.node) * (c.offset - node._pivot);
     }
-    node._leanBase = Math.max(-LEAN_MAX, Math.min(LEAN_MAX, imbalance / (node._mass * LEAN_SPAN)));
+    node._leanBase = node._mass > 0
+      ? Math.max(-LEAN_MAX, Math.min(LEAN_MAX, imbalance / (node._mass * LEAN_SPAN)))
+      : 0;
   } else {
     node._pivot = 0;
     node._leanBase = 0;
   }
-  node._swayPhase = Math.random() * Math.PI * 2;
-  node._swayFreq = SWAY_FREQ * (0.7 + Math.random()*0.6);
-  node._yaw = (Math.random()-0.5) * 0.6;
-  node._yawOmega = (Math.random()-0.5) * 0.3;
-  for(const c of (node.children||[])) initPhysics(c.node);
+  for(const c of (node.children||[])) computeBalance(c.node);
+}
+
+// Random motion state (spin, sway phase) on top of the balance; used at start and on Reset.
+function initPhysics(node){
+  computeBalance(node);
+  (function seed(n){
+    n._swayPhase = Math.random() * Math.PI * 2;
+    n._swayFreq = SWAY_FREQ * (0.7 + Math.random()*0.6);
+    n._yaw = (Math.random()-0.5) * 0.6;
+    n._yawOmega = (Math.random()-0.5) * 0.3;
+    for(const c of (n.children||[])) seed(c.node);
+  })(node);
 }
 
 function stepPhysics(node, dt, t){
@@ -493,23 +618,19 @@ function outlinePoints(shape, size){
     }
     return pts;
   }
-  const p = getScratchPath();
-  p.setAttribute('d', def.d);
-  const len = p.getTotalLength(), pts = [];
-  for(let i=0;i<160;i++){ const q = p.getPointAtLength(len*i/160); pts.push([q.x,q.y]); }
-  return pts;
+  return samplePathD(def.d, 160);
 }
 
 function shapeFrame(node){
-  const bend = Math.max(-1.5, Math.min(1.5, node.bend||0));
+  const bend = clampBend(node);
   // Default pose: a bent panel hangs from its attach point with the hump on top
   // (tangent plane horizontal there). Flat panels default to facing the viewer.
-  const pitch = node.tilt !== undefined ? node.tilt : (bend ? -Math.sign(bend)*Math.PI/2 : 0);
+  const pitch = panelPitch(node);
   const roll = (node.orientation||0)*Math.PI/180;
   const yaw = node._yaw||0;
   const A = (node.bendAxis||0)*Math.PI/180;
   const kappa = bend / node.size;
-  const at = node.attach || [0,0];
+  const at = attachOf(node);
   const cA=Math.cos(A), sA=Math.sin(A);
   const cr=Math.cos(roll), sr=Math.sin(roll);
   const cp=Math.cos(pitch), sp=Math.sin(pitch);
@@ -582,7 +703,9 @@ function childFlatPoint(node, c){
   return c.at ? c.at : [c.offset, (c.anchorY !== undefined ? c.anchorY : 1) * node.size];
 }
 
-function solveHang(node){
+// Hanging-equilibrium model for one shape, built from the gram masses (node._m, massOf).
+// eq(h, ax) evaluates the equilibrium if the string meets the shape at flat point (ax, h).
+function hangModel(node){
   const fr = shapeFrame(node);
   const outline = node._outline || (node._outline = outlinePoints(node.shape, node.size));
   // centre of mass of the (bent) sheet: average over a grid inside the outline
@@ -595,28 +718,41 @@ function solveHang(node){
   }
   const com = n > 0 ? [cx/n, cy/n, cz/n] : [0, 0, 0];
   node._rawCoM = com;
-  const masses = [{m:node.weight, r:com}];
+  const selfM = node._m !== undefined ? node._m
+              : (node.weight !== undefined ? node.weight : weightFromShape(node.shape, node.size, node.density));
+  const masses = [{m:selfM, r:com}];
   for(const c of (node.children||[])){
     const q = childFlatPoint(node, c);
     masses.push({m:massOf(c.node), r:fr.raw(q[0], q[1])});
   }
-  const ax = (node.attach||[0,0])[0];
-  function eq(h){
-    const H = fr.raw(ax, h);
+  const at = attachOf(node);
+  function eq(h, ax){
+    const H = fr.raw(ax === undefined ? at[0] : ax, h);
     let sx=0, sy=0, totalM=0;
     for(const k of masses){
       sx += k.m*(k.r[0]-H[0]);
       sy += k.m*(k.r[1]-H[1]);
       totalM += k.m;
     }
+    const depth = totalM > 0 ? Math.hypot(sx, sy) / totalM : 0;
+    // centre of mass (almost) exactly at the hang point: neutral, any in-plane tilt stays put
+    const neutral = depth < 0.01 * S;
     return {
-      theta: Math.atan2(-sx, sy)*180/Math.PI,
-      stable: sy > 0,
-      metacentricDepth: totalM > 0 ? Math.hypot(sx, sy) / totalM : 0,
+      theta: neutral ? 0 : Math.atan2(-sx, sy)*180/Math.PI,
+      stable: !neutral && sy > 0,
+      neutral,
+      inverted: !neutral && sy < 0,   // stable equilibrium needs the sheet upside down
+      metacentricDepth: depth,
       syPerMass: totalM > 0 ? sy / totalM : 0
     };
   }
-  let h = (node.attach||[0,0])[1];
+  return { eq, at };
+}
+
+function solveHang(node){
+  const M = hangModel(node), eq = M.eq, S = node.size;
+  const ax = M.at[0];
+  let h = M.at[1];
   node._targetSlopeFailed = false;
   if(node.targetSlope !== undefined){
     const T = node.targetSlope, STEPS = 600;
@@ -645,9 +781,10 @@ function solveHang(node){
   }
   const e = eq(h);
   node._slopeDeg = e.theta;
-  node._hangStable = e.stable;
+  node._hangStable = !e.inverted;
+  node._hangNeutral = e.neutral;
   node._hangMetaDepth = e.metacentricDepth;
-  if(!e.stable) console.warn('Unstable hang (masses above the hang point) for a shape of size', node.size);
+  if(e.inverted) console.warn('Unstable hang (masses above the hang point) for a shape of size', node.size);
 }
 
 function resolveTilts(node){
@@ -693,20 +830,29 @@ function normalizeMaterialParams(spec, shapeArg, rodArg, threadArg, optionsArg){
   rIn = rIn || {};
   tIn = tIn || {};
 
+  // An unknown name still falls back to a sensible default, but never silently.
+  const warnings = [];
+  const pick = (table, raw, fallback, label)=>{
+    const key = String(raw).toLowerCase();
+    if(Object.prototype.hasOwnProperty.call(table, key)) return key;
+    warnings.push(`Unknown ${label} "${raw}"; falling back to "${fallback}".`);
+    return fallback;
+  };
+
   const mmPerUnit = optIn.mmPerUnit || sIn.mmPerUnit || (spec && spec.mmPerUnit) || 2.0;
 
   // 1. Shape material normalization (balsa + thickness + layers + grain/glue/hole params)
-  const shapeKey = (sIn.material || sIn.type || 'balsa').toLowerCase();
-  const shapePresetGroup = MATERIAL_PRESETS.shapes[shapeKey] || MATERIAL_PRESETS.shapes.balsa;
-  const gradeKey = (sIn.grade || 'medium').toLowerCase();
-  const baseWood = shapePresetGroup.grades[gradeKey] || shapePresetGroup.grades.medium;
+  const shapeKey = pick(MATERIAL_PRESETS.shapes, sIn.material || sIn.type || 'balsa', 'balsa', 'shape material');
+  const shapePresetGroup = MATERIAL_PRESETS.shapes[shapeKey];
+  const gradeKey = pick(shapePresetGroup.grades, sIn.grade || 'medium', 'medium', `${shapeKey} grade`);
+  const baseWood = shapePresetGroup.grades[gradeKey];
 
   const layers = Math.max(1, Math.round(sIn.layers !== undefined ? sIn.layers : (sIn.gluedLayers || 1)));
   const layerThicknessMm = sIn.thicknessMm !== undefined ? sIn.thicknessMm
                          : (sIn.thickness !== undefined ? sIn.thickness : 1.588); // 1/16 inch default
   const totalThicknessMm = layers * layerThicknessMm;
-  const glueKey = (sIn.glueType || sIn.glue || 'pva').toLowerCase();
-  const glueSpec = MATERIAL_PRESETS.glues[glueKey] || MATERIAL_PRESETS.glues.pva;
+  const glueKey = pick(MATERIAL_PRESETS.glues, sIn.glueType || sIn.glue || 'pva', 'pva', 'glue type');
+  const glueSpec = MATERIAL_PRESETS.glues[glueKey];
 
   const shapes = {
     material: shapeKey,
@@ -724,15 +870,15 @@ function normalizeMaterialParams(spec, shapeArg, rodArg, threadArg, optionsArg){
     glueArealGPerM2: sIn.glueArealGPerM2 !== undefined ? sIn.glueArealGPerM2 : glueSpec.arealGPerM2,
     stiffnessBoost: glueSpec.stiffnessBoost,
     grainAngleDeg: sIn.grainAngleDeg !== undefined ? sIn.grainAngleDeg : 90, // default along shape Y-axis
-    warmWetBent: !!sIn.warmWetBent,
+    warmWetBent: !!sIn.warmWetBent, // default false: never assume a forming process the builder did not declare
     holeReinforced: !!sIn.holeReinforced,
     minEdgeMarginMm: sIn.minEdgeMarginMm !== undefined ? sIn.minEdgeMarginMm : 3.0,
     finishCoatGPerM2: sIn.finishCoatGPerM2 !== undefined ? sIn.finishCoatGPerM2 : 20
   };
 
   // 2. Rod material normalization (pine or oak round rod of specified diameter)
-  const rodKey = (rIn.material || rIn.type || rIn.wood || 'pine').toLowerCase();
-  const baseRod = MATERIAL_PRESETS.rods[rodKey] || MATERIAL_PRESETS.rods.pine;
+  const rodKey = pick(MATERIAL_PRESETS.rods, rIn.material || rIn.type || rIn.wood || 'pine', 'pine', 'rod material');
+  const baseRod = MATERIAL_PRESETS.rods[rodKey];
   const rods = {
     material: rodKey,
     name: baseRod.name,
@@ -747,8 +893,8 @@ function normalizeMaterialParams(spec, shapeArg, rodArg, threadArg, optionsArg){
   };
 
   // 3. Thread material normalization (traditional mobile threads + transparent monofilaments)
-  const threadKey = (tIn.material || tIn.type || 'nylon_monofilament').toLowerCase();
-  const baseThread = MATERIAL_PRESETS.threads[threadKey] || MATERIAL_PRESETS.threads.nylon_monofilament;
+  const threadKey = pick(MATERIAL_PRESETS.threads, tIn.material || tIn.type || 'nylon_monofilament', 'nylon_monofilament', 'thread material');
+  const baseThread = MATERIAL_PRESETS.threads[threadKey];
   const threads = {
     material: threadKey,
     name: baseThread.name,
@@ -764,7 +910,7 @@ function normalizeMaterialParams(spec, shapeArg, rodArg, threadArg, optionsArg){
     safetyFactor: tIn.safetyFactor || 4.0
   };
 
-  return { mmPerUnit, shapes, rods, thread: threads };
+  return { mmPerUnit, shapes, rods, thread: threads, warnings };
 }
 
 function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
@@ -772,21 +918,34 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
     return { valid: false, status: 'ERROR', issues: [{ severity: 'ERROR', category: 'spec', message: 'Missing spec.root' }] };
   }
 
-  // Ensure engine weights, tilts, and pivots are populated
-  resolveWeights(spec.root);
-  resolveTilts(spec.root);
-  if(spec.root._mass === undefined) initPhysics(spec.root);
-
   const cfg = normalizeMaterialParams(spec, shapeMat, rodMat, threadMat, options);
   const { mmPerUnit, shapes: S, rods: R, thread: T } = cfg;
   const g_accel = 9.80665; // m/s^2 (N per kg)
 
+  // Ids, masses (grams), hang tilts and balance points all come from this one material model,
+  // so the simulator, build sheet and verifier can never disagree about weight.
+  assignIds(spec.root);
+  resolveWeights(spec.root, cfg);
+  resolveTilts(spec.root);
+  computeBalance(spec.root);
+  if(spec.root._swayPhase === undefined) initPhysics(spec.root);
+
   const issues = [];
   const nodeReports = [];
-  let shapeIndex = 0, rodIndex = 0;
 
   function addIssue(severity, category, nodeId, message, details){
     issues.push({ severity, category, nodeId, message, details });
+  }
+  for(const w of cfg.warnings) addIssue('WARN', 'unknown_parameter', 'materials', w);
+
+  // Hole / hang point vs. cut edge. A point within EDGE_EPS_MM of the outline counts as ON it
+  // (the default bottom-edge anchor lands exactly on the outline, so float noise must not
+  // decide between ERROR and WARN).
+  function classifyEdge(outline, pt){
+    const e = signedEdgeMargin(outline, pt[0], pt[1]);
+    const mm = e.signedUnits * mmPerUnit;
+    const onEdge = Math.abs(mm) < EDGE_EPS_MM;
+    return { outside: !e.inside && !onEdge, marginMm: onEdge ? 0 : mm };
   }
 
   // Orthotropic modulus helper (Hankinson formula) for wood at angle deltaRad to grain
@@ -810,7 +969,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
   // Recursive post-order pass: calculates physical masses (grams) and checks every node
   function inspectNode(node, depthLevel, incomingStringUnits, parentLabel){
     const isShape = node.type === 'shape';
-    const nodeId = node.id || (isShape ? `${node.shape}_${++shapeIndex}` : `rod_${++rodIndex}`);
+    const nodeId = node._id;
     const outline = isShape ? (node._outline || (node._outline = outlinePoints(node.shape, node.size))) : null;
 
     // Inspect children first so we know their exact physical masses in grams
@@ -825,86 +984,126 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
     for(const cr of childResults) childrenMassGrams += cr.report.totalMassGrams;
 
     if(isShape){
-      // 1. Physical mass of shape (wood + glue lines + paint/finish on 2 faces)
-      const areaUnits2 = areaOfShape(node.shape, node.size);
-      const areaMm2 = areaUnits2 * (mmPerUnit ** 2);
-      const areaM2 = areaMm2 * 1e-6;
-
-      const woodMassGrams = areaM2 * (S.totalThicknessMm * 1e-3) * S.densityKgM3 * 1000;
-      const glueMassGrams = areaM2 * Math.max(0, S.layers - 1) * S.glueArealGPerM2;
-      const finishMassGrams = areaM2 * 2 * S.finishCoatGPerM2;
-      selfMassGrams = woodMassGrams + glueMassGrams + finishMassGrams;
+      // 1. Physical mass: an explicit weight/density wins, else wood + glue lines + finish on 2 faces
+      const mb = shapeMass(node, cfg);
+      const areaMm2 = mb.areaMm2;
+      selfMassGrams = node._m;
       node._selfMassGrams = selfMassGrams; // <-- store physical mass in grams for buildSheet
+      if(node._massSource !== 'material' && mb.total > 0){
+        const off = Math.abs(selfMassGrams / mb.total - 1);
+        if(off > 0.35){
+          addIssue('WARN', 'weight_override_mismatch', nodeId,
+            `Explicit ${node._massSource} gives ${selfMassGrams.toFixed(2)} g but the material spec predicts ${mb.total.toFixed(2)} g (${(off*100).toFixed(0)}% off); every check uses the explicit value.`,
+            { explicitGrams: selfMassGrams, predictedGrams: mb.total }
+          );
+        }
+      }
 
       const totalMassGrams = selfMassGrams + childrenMassGrams;
       const totalLoadN = (totalMassGrams * 1e-3) * g_accel;
 
       // 2. Check forming bend stress & single-layer springback/humidity relaxation
-      const bendRad = Math.abs(node.bend || 0);
+      const rawBend = node.bend || 0;
+      const bendRad = Math.abs(clampBend(node)); // same clamp the renderer applies
+      if(Math.abs(rawBend) > 1.5){
+        addIssue('WARN', 'bend_clamped', nodeId,
+          `bend=${rawBend} is outside +/-1.5 rad; the renderer clamps it to ${clampBend(node)} and verification uses the clamped value.`,
+          { bend: rawBend, clamped: clampBend(node) }
+        );
+      }
       const sizeMm = node.size * mmPerUnit;
       if(bendRad > 1e-4){
         const radiusMm = sizeMm / bendRad;
         const bendAxisDeg = node.bendAxis || 0;
+        // angle between the curvature direction and the grain: 0 = fibres wrap the curve (stiff, ~0.5% strain limit),
+        // 90 = curve runs across the fibres (soft, tolerates far more strain)
         const grainDeltaRad = ((bendAxisDeg - S.grainAngleDeg) * Math.PI) / 180;
 
-        // During forming over a cylinder, each single ply bends before glue cures,
-        // and wet/steam forming plasticizes lignin (reducing forming modulus by ~65%).
+        // Each single ply bends before the glue cures.
         const c2 = Math.cos(grainDeltaRad)**2, s2 = Math.sin(grainDeltaRad)**2;
-        const E_singlePly = (S.E_L_MPa * S.E_T_MPa) / (S.E_L_MPa * s2 + S.E_T_MPa * c2);
-        const E_forming = E_singlePly * (S.warmWetBent ? 0.35 : 1.0);
+        const E_forming = (S.E_L_MPa * S.E_T_MPa) / (S.E_L_MPa * s2 + S.E_T_MPa * c2);
 
         const outerStrain = S.thicknessMm / (2 * radiusMm);
         const formingStressMPa = E_forming * outerStrain;
+        // Wet/steam forming is credited ONCE: a 1.85x allowance on the outer-fibre limit
+        // (it is not also applied as a softer modulus, which would multiply to ~5x).
         const maxFormingStressMPa = S.sigmaBendMPa * (S.warmWetBent ? 1.85 : 1.0) * (c2 + 0.25 * s2);
 
         if(formingStressMPa > maxFormingStressMPa){
           addIssue('ERROR', 'shape_bending_fracture', nodeId,
-            `Balsa sheet will crack during bending: outer-fiber stress ${formingStressMPa.toFixed(1)} MPa exceeds allowable ${maxFormingStressMPa.toFixed(1)} MPa (R=${radiusMm.toFixed(1)} mm, layer t=${S.thicknessMm} mm).`,
-            { radiusMm, formingStressMPa, maxFormingStressMPa, recommendation: 'Use thinner sheets laminated in multiple layers, steam-bend, or align grain perpendicular to bend axis.' }
+            `${S.material} sheet will crack during bending: outer-fiber stress ${formingStressMPa.toFixed(1)} MPa exceeds allowable ${maxFormingStressMPa.toFixed(1)} MPa (R=${radiusMm.toFixed(1)} mm, layer t=${S.thicknessMm} mm).`,
+            { radiusMm, formingStressMPa, maxFormingStressMPa, recommendation: 'Use thinner sheets laminated in multiple layers, wet/steam-form (warmWetBent), or run the grain across the curve (grain perpendicular to the curvature direction).' }
           );
         } else if(formingStressMPa > 0.75 * maxFormingStressMPa){
           addIssue('WARN', 'shape_tight_bend', nodeId,
-            `Tight bend radius (${radiusMm.toFixed(1)} mm) is at ${(formingStressMPa/maxFormingStressMPa*100).toFixed(0)}% of balsa fracture limit.`,
+            `Tight bend radius (${radiusMm.toFixed(1)} mm) is at ${(formingStressMPa/maxFormingStressMPa*100).toFixed(0)}% of the ${S.material} fracture limit.`,
             { radiusMm, formingStressMPa, maxFormingStressMPa }
           );
         }
 
         if(bendRad >= 0.25 && S.layers === 1){
           addIssue('WARN', 'single_layer_unbending', nodeId,
-            `Curved shape (bend=${node.bend} rad) uses only 1 layer of ${S.material}; unlaminated balsa will relax and flatten over time with humidity changes.`,
-            { bend: node.bend, layers: S.layers, recommendation: 'Laminate at least 2 thinner glued layers over a form to lock in curvature.' }
+            `Curved shape (bend=${clampBend(node)} rad) uses only 1 layer of ${S.material}; unlaminated sheet will relax and flatten over time with humidity changes.`,
+            { bend: clampBend(node), layers: S.layers, recommendation: 'Laminate at least 2 thinner glued layers over a form to lock in curvature.' }
           );
         }
       }
 
-      // 3. Check gravity-induced drooping / cross-grain cantilever sag
-      const spanMm = sizeMm; // characteristic half-span from center
-      const widthMm = Math.max(12, areaMm2 / (2 * sizeMm));
-      // Effective structural depth includes arch rise perpendicular to bend axis
-      const archRiseMm = bendRad > 0.05 ? sizeMm * (1 - Math.cos(bendRad)) / bendRad : 0;
-      const grainToYRad = ((90 - S.grainAngleDeg) * Math.PI) / 180;
-      const E_span = effectiveWoodModulus(grainToYRad);
-      // If bendAxis is 0 (curves left-right), the arch stiffens the Y-axis; if bendAxis is 90 (curves top-bottom), Y-axis has no arch rib
-      const bendAxisRad = ((node.bendAxis || 0) * Math.PI) / 180;
-      const archStiffeningAlongY = Math.abs(Math.cos(bendAxisRad));
-      const h_effMm = S.totalThicknessMm + 0.35 * archRiseMm * archStiffeningAlongY;
-      const I_panelMm4 = (widthMm * (h_effMm ** 3)) / 12;
+      // 3. Gravity droop. Only the weight component acting NORMAL to the sheet bends it, so a sheet
+      //    hanging in a vertical plane (tilt 0, slope 0) carries gravity in-plane and cannot sag.
+      const slopeNow = node._slopeDeg !== undefined ? node._slopeDeg : (typeof node.slope === 'number' ? node.slope : 0);
+      const normalG = Math.abs(Math.sin(panelPitch(node)) * Math.cos(slopeNow * Math.PI / 180));
+      let panelDeflectionMm = 0;
+      if(normalG > 0.05){
+        const H = attachOf(node);
+        let reachUnits = 0;
+        for(const [x, y] of outline) reachUnits = Math.max(reachUnits, Math.hypot(x - H[0], y - H[1]));
+        const spanMm = Math.max(1, reachUnits * mmPerUnit);          // longest arm from the hang point
+        const widthMm = Math.max(1, areaMm2 / (2 * sizeMm));         // mean arm width (no artificial floor)
 
-      const tipLoadN = ((childrenMassGrams + 0.5 * selfMassGrams) * 1e-3) * g_accel;
-      const panelDeflectionMm = (tipLoadN * (spanMm ** 3)) / (3 * E_span * I_panelMm4);
-      if(panelDeflectionMm > spanMm * 0.03){
-        addIssue('WARN', 'shape_drooping', nodeId,
-          `Shape "${nodeId}" may sag/droop by ~${panelDeflectionMm.toFixed(2)} mm (${(panelDeflectionMm/spanMm*100).toFixed(1)}% of span) under gravity/child loads.`,
-          { panelDeflectionMm, spanMm, E_span_MPa: E_span, layers: S.layers }
-        );
+        // child loads sit at their real distance from the hang point; the dominant span direction
+        // comes from the load-weighted direction (doubled-angle average, so +/- sides agree)
+        const loads = [];
+        let sc = 0, ss = 0;
+        for(const cr of childResults){
+          const p = childFlatPoint(node, cr.link);
+          const dx = p[0] - H[0], dy = p[1] - H[1];
+          const F = (cr.report.totalMassGrams * 1e-3) * g_accel * normalG;
+          const x = Math.min(spanMm, Math.hypot(dx, dy) * mmPerUnit);
+          loads.push({ F, x, side: dx < 0 ? 'neg' : 'pos' });
+          if(F * x > 0){ const a = Math.atan2(dy, dx); sc += F * x * Math.cos(2 * a); ss += F * x * Math.sin(2 * a); }
+        }
+        const phi = (sc === 0 && ss === 0) ? Math.PI / 2 : 0.5 * Math.atan2(ss, sc);
+
+        const E_span = effectiveWoodModulus(phi - (S.grainAngleDeg * Math.PI) / 180);
+        const archRiseMm = bendRad > 0.05 ? sizeMm * (1 - Math.cos(bendRad)) / bendRad : 0;
+        const bendAxisRad = ((node.bendAxis || 0) * Math.PI) / 180;
+        // a cylinder curved along bendAxis only arches a strip running along it, by cos^2 of the angle between them
+        const archAlongSpan = Math.cos(phi - bendAxisRad) ** 2;
+        const h_effMm = S.totalThicknessMm + 0.35 * archRiseMm * archAlongSpan;
+        const EI = E_span * (widthMm * (h_effMm ** 3) / 12);
+
+        const L = spanMm;
+        const selfF = 0.5 * (selfMassGrams * 1e-3) * g_accel * normalG; // half the sheet's weight per arm, spread uniformly
+        const defl = { neg: selfF * L**3 / (8 * EI), pos: selfF * L**3 / (8 * EI) };
+        for(const ld of loads) defl[ld.side] += ld.F * ld.x**2 * (3 * L - ld.x) / (6 * EI);
+        panelDeflectionMm = Math.max(defl.neg, defl.pos);
+
+        if(panelDeflectionMm > spanMm * 0.03){
+          addIssue('WARN', 'shape_drooping', nodeId,
+            `Shape "${nodeId}" may sag/droop by ~${panelDeflectionMm.toFixed(2)} mm (${(panelDeflectionMm/spanMm*100).toFixed(1)}% of span) under gravity/child loads.`,
+            { panelDeflectionMm, spanMm, E_span_MPa: E_span, layers: S.layers, normalGravityFraction: normalG }
+          );
+        }
       }
+      node._droopMm = panelDeflectionMm;
 
       // 4. Check parent attachment hole margin & tear-out
-      const attachPt = node.attach || [0, 0];
-      const topEdge = signedEdgeMargin(outline, attachPt[0], attachPt[1]);
-      const topMarginMm = topEdge.signedUnits * mmPerUnit;
+      const attachPt = attachOf(node);
+      const topEdge = classifyEdge(outline, attachPt);
+      const topMarginMm = topEdge.marginMm;
 
-      if(!topEdge.inside){
+      if(topEdge.outside){
         addIssue('ERROR', 'attach_outside_shape', nodeId,
           `Upper hang point [${attachPt[0].toFixed(1)}, ${attachPt[1].toFixed(1)}] lies OUTSIDE the boundary of "${nodeId}" by ${Math.abs(topMarginMm).toFixed(1)} mm.`,
           { attach: attachPt, marginMm: topMarginMm }
@@ -912,7 +1111,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
       } else {
         if(topMarginMm < S.minEdgeMarginMm){
           addIssue('WARN', 'fragile_edge_margin', nodeId,
-            `Upper hang hole on "${nodeId}" is only ${topMarginMm.toFixed(2)} mm from the cut edge (min recommended: ${S.minEdgeMarginMm} mm); high risk of balsa grain splitting.`,
+            `Upper hang hole on "${nodeId}" is only ${topMarginMm.toFixed(2)} mm from the cut edge (min recommended: ${S.minEdgeMarginMm} mm); high risk of grain splitting.`,
             { attach: attachPt, marginMm: topMarginMm }
           );
         }
@@ -920,17 +1119,17 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
         const reinfFactor = (S.holeReinforced ? 2.8 : 1.0) * (S.crossGrainLayers && S.layers > 1 ? 1.8 : 1.0);
         const tearOutCapacityN = 2 * Math.max(0.2, topMarginMm) * S.totalThicknessMm * S.tauShearMPa * reinfFactor;
         if(totalLoadN > tearOutCapacityN / 2.5){
-          addIssue(totalLoadN > tearOutCapacityN ? 'ERROR' : 'WARN', 'hole_tearout_stress', nodeId,
-            `Suspension load (${totalMassGrams.toFixed(1)} g) at upper pinhole of "${nodeId}" approaches balsa tear-out strength (safety factor ${(tearOutCapacityN/Math.max(1e-5, totalLoadN)).toFixed(1)}x).`,
+          addIssue(totalLoadN > tearOutCapacityN / SF_FAIL ? 'ERROR' : 'WARN', 'hole_tearout_stress', nodeId,
+            `Suspension load (${totalMassGrams.toFixed(1)} g) at upper pinhole of "${nodeId}" approaches ${S.material} tear-out strength (safety factor ${(tearOutCapacityN/Math.max(1e-5, totalLoadN)).toFixed(1)}x).`,
             { loadN: totalLoadN, tearOutCapacityN }
           );
         }
-        // Check "cheese-wire" bearing pressure of ultra-thin thread cutting into soft balsa
+        // Check "cheese-wire" bearing pressure of ultra-thin thread cutting into the sheet
         const bearingStressMPa = totalLoadN / (Math.max(0.08, T.diameterMm) * S.totalThicknessMm);
         const maxBearingMPa = S.tauShearMPa * 1.6 * reinfFactor;
         if(bearingStressMPa > maxBearingMPa){
           addIssue('WARN', 'thread_cheesewire', nodeId,
-            `Thin ${T.diameterMm} mm thread under ${totalMassGrams.toFixed(1)} g load creates ${bearingStressMPa.toFixed(2)} MPa bearing pressure and may cut into soft ${S.material} at "${nodeId}" unless pinhole is CA-hardened.`,
+            `Thin ${T.diameterMm} mm thread under ${totalMassGrams.toFixed(1)} g load creates ${bearingStressMPa.toFixed(2)} MPa bearing pressure and may cut into ${S.material} at "${nodeId}" unless pinhole is CA-hardened.`,
             { bearingStressMPa, maxBearingMPa }
           );
         }
@@ -939,24 +1138,26 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
       // 5. Check lower child attachment points on this shape
       for(const cr of childResults){
         const cPt = childFlatPoint(node, cr.link);
-        const cEdge = signedEdgeMargin(outline, cPt[0], cPt[1]);
-        const cMarginMm = cEdge.signedUnits * mmPerUnit;
+        const cEdge = classifyEdge(outline, cPt);
+        const cMarginMm = cEdge.marginMm;
         const cId = cr.report.nodeId;
-        if(!cEdge.inside){
+        if(cEdge.outside){
           addIssue('ERROR', 'child_attach_outside', nodeId,
             `Lower attachment point [${cPt[0].toFixed(1)}, ${cPt[1].toFixed(1)}] for child "${cId}" lies OUTSIDE parent shape "${nodeId}" (${Math.abs(cMarginMm).toFixed(1)} mm past edge).`,
             { childId: cId, point: cPt, marginMm: cMarginMm }
           );
         } else if(cMarginMm < S.minEdgeMarginMm){
           addIssue('WARN', 'child_attach_fragile', nodeId,
-            `Lower attachment hole for child "${cId}" on "${nodeId}" is only ${cMarginMm.toFixed(2)} mm from the edge (recommended >= ${S.minEdgeMarginMm} mm); fragile balsa tip may tear.`,
+            `Lower attachment hole for child "${cId}" on "${nodeId}" is only ${cMarginMm.toFixed(2)} mm from the edge (recommended >= ${S.minEdgeMarginMm} mm); fragile tip may tear.`,
             { childId: cId, point: cPt, marginMm: cMarginMm }
           );
         }
       }
 
-      // 6. Check 3D hanging stability & targetSlope convergence
-      if(node.slope === 'auto' || node.targetSlope !== undefined){
+      // 6. Hanging equilibrium for EVERY shape (not only slope:'auto' / targetSlope), from the gram masses
+      const solved = node.slope === 'auto' || node.targetSlope !== undefined;
+      const heq = hangModel(node).eq(attachPt[1], attachPt[0]);
+      if(solved){
         if(node._targetSlopeFailed){
           addIssue('ERROR', 'target_slope_unreachable', nodeId,
             `No stable hang point on "${nodeId}" can achieve targetSlope=${node.targetSlope}°.`,
@@ -968,16 +1169,29 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
             { targetSlope: node.targetSlope, actualSlope: node._slopeDeg }
           );
         }
-        if(node._hangStable === false){
-          addIssue('ERROR', 'unstable_hang_inversion', nodeId,
-            `Shape "${nodeId}" has its combined center of mass ABOVE the hang point and will flip upside-down.`,
-            { attach: node.attach }
-          );
-        } else if((node._hangMetaDepth || 0) * mmPerUnit < 1.5){
-          addIssue('WARN', 'marginal_pendulum_stability', nodeId,
-            `Shape "${nodeId}" has a very small pendulum restoring arm (${((node._hangMetaDepth||0)*mmPerUnit).toFixed(2)} mm); light air drafts will cause erratic rocking.`,
-            { metacentricDepthMm: (node._hangMetaDepth||0)*mmPerUnit }
-          );
+      }
+      if(heq.inverted){
+        addIssue('ERROR', 'unstable_hang_inversion', nodeId,
+          `Shape "${nodeId}" has its combined center of mass ABOVE the hang point and will flip upside-down.`,
+          { attach: attachPt }
+        );
+      } else if(!heq.neutral){
+        if(solved){
+          if(heq.metacentricDepth * mmPerUnit < 1.5){
+            addIssue('WARN', 'marginal_pendulum_stability', nodeId,
+              `Shape "${nodeId}" has a very small pendulum restoring arm (${(heq.metacentricDepth*mmPerUnit).toFixed(2)} mm); light air drafts will cause erratic rocking.`,
+              { metacentricDepthMm: heq.metacentricDepth * mmPerUnit }
+            );
+          }
+        } else {
+          const declared = typeof node.slope === 'number' ? node.slope : 0;
+          const diff = ((heq.theta - declared + 540) % 360) - 180;
+          if(Math.abs(diff) > 5){
+            addIssue('WARN', 'hang_slope_mismatch', nodeId,
+              `"${nodeId}" is drawn at slope ${declared.toFixed(1)}° but its weights and hang point settle it at ${heq.theta.toFixed(1)}°; use slope:'auto' or targetSlope, or move the hang point.`,
+              { declaredSlope: declared, equilibriumSlope: heq.theta }
+            );
+          }
         }
       }
 
@@ -986,7 +1200,8 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
         lengthMm: node.size * 2 * mmPerUnit,
         areaCm2: areaMm2 / 100,
         selfMassGrams, childrenMassGrams, totalMassGrams,
-        topMarginMm, tiltDeg: node._slopeDeg || 0
+        topMarginMm, tiltDeg: slopeNow,
+        hangTiltDeg: heq.theta, droopMm: panelDeflectionMm
       };
       nodeReports.push(rep);
       checkIncomingString(nodeId, parentLabel, incomingStringUnits, totalMassGrams, totalLoadN);
@@ -994,18 +1209,13 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
 
     } else {
       // ROD NODE VERIFICATION (Pine / Oak round dowel of diameterMm)
-      let minOff = 0, maxOff = 0;
-      for(const c of (node.children || [])){
-        minOff = Math.min(minOff, c.offset);
-        maxOff = Math.max(maxOff, c.offset);
-      }
+      const [minOff, maxOff] = rodExtent(node);
       const spanUnits = maxOff - minOff;
       const lengthMm = spanUnits * mmPerUnit;
       const radiusMm = R.diameterMm / 2;
-      const crossAreaMm2 = Math.PI * (radiusMm ** 2);
 
-      // Physical mass of the wooden dowel
-      selfMassGrams = (crossAreaMm2 * lengthMm * 1e-9) * R.densityKgM3 * 1000;
+      // Physical mass of the wooden dowel (same figure the simulator balances with)
+      selfMassGrams = node._m;
       const totalMassGrams = selfMassGrams + childrenMassGrams;
       const totalLoadN = (totalMassGrams * 1e-3) * g_accel;
 
@@ -1016,7 +1226,8 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
         );
       }
 
-      // Compare engine massless-rod pivot vs. true physical balance point including dowel self-weight
+      // True physical balance point including dowel self-weight. Auto-balanced rods already use it,
+      // so the offset is only non-zero for an explicit `pivot`, which is the documented way to ask for a lean.
       const enginePivotUnits = node._pivot || 0;
       const rodMidpointUnits = (minOff + maxOff) / 2;
       let trueTorqueSum = selfMassGrams * rodMidpointUnits;
@@ -1024,17 +1235,18 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
         trueTorqueSum += cr.report.totalMassGrams * cr.link.offset;
       }
       const truePivotUnits = totalMassGrams > 0 ? trueTorqueSum / totalMassGrams : enginePivotUnits;
-      const pivotShiftMm = Math.abs(truePivotUnits - enginePivotUnits) * mmPerUnit;
+      const pivotOffsetMm = (enginePivotUnits - truePivotUnits) * mmPerUnit;
+      const leanRad = (truePivotUnits - enginePivotUnits) / LEAN_SPAN; // same lean model the renderer uses, unclamped
 
-      if(pivotShiftMm > 2.5){
-        addIssue('WARN', 'rod_self_weight_shift', nodeId,
-          `${R.name} (${R.diameterMm} mm, ${selfMassGrams.toFixed(2)} g) shifts the real balance point of "${nodeId}" by ${pivotShiftMm.toFixed(1)} mm compared to the simulator's massless-rod pivot.`,
-          { enginePivotMm: enginePivotUnits * mmPerUnit, truePivotMm: truePivotUnits * mmPerUnit, rodMassGrams: selfMassGrams, payloadMassGrams: childrenMassGrams }
+      if(node.pivot !== undefined && Math.abs(leanRad) > LEAN_MAX){
+        addIssue('WARN', 'rod_lean_clamped', nodeId,
+          `Explicit pivot on "${nodeId}" is ${Math.abs(pivotOffsetMm).toFixed(1)} mm from the physical balance point; the lean model gives ${(leanRad*180/Math.PI).toFixed(0)}°, beyond the ${(LEAN_MAX*180/Math.PI).toFixed(0)}° the renderer shows.`,
+          { enginePivotMm: enginePivotUnits * mmPerUnit, truePivotMm: truePivotUnits * mmPerUnit, leanDeg: leanRad * 180 / Math.PI }
         );
       }
       if(selfMassGrams > childrenMassGrams * 1.5 && childrenMassGrams > 0){
         addIssue('WARN', 'heavy_rod_vs_balsa', nodeId,
-          `Rod "${nodeId}" (${selfMassGrams.toFixed(2)} g of ${R.material}) weighs more than 1.5x the entire balsa payload hanging from it (${childrenMassGrams.toFixed(2)} g); consider a thinner dowel.`,
+          `Rod "${nodeId}" (${selfMassGrams.toFixed(2)} g of ${R.material}) weighs more than 1.5x the entire payload hanging from it (${childrenMassGrams.toFixed(2)} g); consider a thinner dowel.`,
           { rodMassGrams: selfMassGrams, childrenMassGrams }
         );
       }
@@ -1081,7 +1293,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
       const allowableRodStressMPa = R.morMPa / 3.0; // 3x safety factor for wood knots/grain runout
 
       if(maxBendStressMPa > allowableRodStressMPa){
-        addIssue(maxBendStressMPa > R.morMPa ? 'ERROR' : 'WARN', 'rod_bending_stress', nodeId,
+        addIssue(maxBendStressMPa > R.morMPa / SF_FAIL ? 'ERROR' : 'WARN', 'rod_bending_stress', nodeId,
           `${R.name} "${nodeId}" bending stress (${maxBendStressMPa.toFixed(1)} MPa) exceeds safe working limit (${allowableRodStressMPa.toFixed(1)} MPa).`,
           { maxBendStressMPa, allowableRodStressMPa }
         );
@@ -1089,7 +1301,8 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
 
       const maxDeflMm = Math.max(leftDeflMm, rightDeflMm);
       const maxArmMm = Math.max(leftArmMm, rightArmMm, 1);
-      if(maxDeflMm / maxArmMm > R.maxDeflectionRatio && maxDeflMm > 1.5){
+      // ratio test applies at every scale; the small absolute floor only ignores numerical dust
+      if(maxDeflMm / maxArmMm > R.maxDeflectionRatio && maxDeflMm > 0.05){
         addIssue('WARN', 'rod_sagging', nodeId,
           `${R.name} "${nodeId}" tips sag by ${maxDeflMm.toFixed(2)} mm (${(maxDeflMm/maxArmMm*100).toFixed(2)}% of arm span); increase rod diameter above ${R.diameterMm} mm or switch to oak.`,
           { maxDeflMm, maxArmMm, ratio: maxDeflMm / maxArmMm }
@@ -1101,6 +1314,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
         lengthMm, selfMassGrams, childrenMassGrams, totalMassGrams,
         enginePivotMm: enginePivotUnits * mmPerUnit,
         truePivotMm: truePivotUnits * mmPerUnit,
+        pivotOffsetMm, leanDeg: leanRad * 180 / Math.PI,
         maxDeflMm, maxBendStressMPa
       };
       nodeReports.push(rep);
@@ -1113,7 +1327,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
     const stringLengthMm = (stringUnits || 0) * mmPerUnit;
     if(tensionN > threadSafeWorkingN){
       const actualSF = threadKnottedBreakN / Math.max(1e-6, tensionN);
-      addIssue(actualSF < 1.5 ? 'ERROR' : 'WARN', 'thread_overload', nodeId,
+      addIssue(actualSF < SF_FAIL ? 'ERROR' : 'WARN', 'thread_overload', nodeId,
         `String above "${nodeId}" carries ${supportedMassGrams.toFixed(1)} g (safety factor ${actualSF.toFixed(1)}x vs knotted break strength ${(threadKnottedBreakN/g_accel*1000).toFixed(0)} g for ${T.diameterMm} mm ${T.name}).`,
         { supportedMassGrams, safetyFactor: actualSF, recommendedSafetyFactor: T.safetyFactor }
       );
@@ -1128,7 +1342,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
         );
       }
     }
-    // Check monofilament coil memory under very light balsa loads
+    // Check monofilament coil memory under very light loads
     if(supportedMassGrams < minStraightGrams && stringLengthMm > 15){
       addIssue('WARN', 'thread_coil_memory', nodeId,
         `Light load (${supportedMassGrams.toFixed(2)} g) on "${nodeId}" is below the ~${minStraightGrams.toFixed(1)} g threshold needed to pull ${T.diameterMm} mm ${T.name} straight against spool coil memory.`,
@@ -1190,14 +1404,14 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
 function buildSheet(node, rows, mmPerUnit){
   mmPerUnit = mmPerUnit || 2.0;
   if(node.type === 'shape'){
-    const s = node.size, h = (node.attach||[0,0])[1];
+    const s = node.size, h = attachOf(node)[1];
     rows.push({
-      id: node.id || node.shape,
+      id: node._id || node.id || node.shape,
       lengthMm: s * 2 * mmPerUnit,
-      weightG: node._selfMassGrams !== undefined ? node._selfMassGrams : node.weight,
+      weightG: node._selfMassGrams !== undefined ? node._selfMassGrams : (node._m !== undefined ? node._m : 0),
       fromEndMm: (s - h) * mmPerUnit,
       fromOtherMm: (s + h) * mmPerUnit,
-      tiltDeg: node._slopeDeg || 0
+      tiltDeg: node._slopeDeg !== undefined ? node._slopeDeg : (typeof node.slope === 'number' ? node.slope : 0)
     });
   }
   for(const c of (node.children||[])) buildSheet(c.node, rows, mmPerUnit);
@@ -1503,7 +1717,10 @@ function start(spec, shapeMat, rodMat, threadMat){
   } else {
     camElev = DEFAULT_CAM_ELEV;
   }
-  resolveWeights(spec.root);
+  // One material model drives ids, masses (grams), hang tilts, balance points AND verification.
+  const cfg = normalizeMaterialParams(spec, shapeMat, rodMat, threadMat);
+  assignIds(spec.root);
+  resolveWeights(spec.root, cfg);
   resolveTilts(spec.root);
   initPhysics(spec.root);
 
@@ -1663,5 +1880,7 @@ function start(spec, shapeMat, rodMat, threadMat){
   requestAnimationFrame(frame);
 }
 
-window.MobileEngine = { start, verifyMobile, weightFromShape, areaOfShape, MATERIAL_PRESETS };
+const api = { start, verifyMobile, weightFromShape, areaOfShape, MATERIAL_PRESETS };
+if(typeof window !== 'undefined') window.MobileEngine = api;
+if(typeof module !== 'undefined' && module.exports) module.exports = api;
 })();
