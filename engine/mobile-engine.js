@@ -1377,6 +1377,78 @@ function injectSliderStyles(){
       min-width: 36px;
       text-align: center;
     }
+    
+    #sheet {
+      max-width: 340px;
+      z-index: 10;
+    }
+    #sheet .verify-section {
+      margin-top: 10px;
+      padding-top: 8px;
+      border-top: 1px solid #cfccbc;
+    }
+    #sheet .verify-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--ink, #17181A);
+      margin: 0 0 6px;
+    }
+    #sheet .verify-badge {
+      font-size: 9.5px;
+      padding: 1px 6px;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+      color: #fff;
+      border-radius: 2px;
+    }
+    #sheet .verify-badge.pass { background: #1f7a3f; }
+    #sheet .verify-badge.warn { background: #b87d14; }
+    #sheet .verify-badge.fail { background: #c8341f; }
+    #sheet .verify-pane {
+      max-height: 150px;
+      overflow-y: auto;
+      overflow-x: hidden;
+      border: 1px solid #d8d5c6;
+      background: rgba(255, 255, 255, 0.45);
+      padding: 6px 8px;
+      font-size: 10px;
+      line-height: 1.38;
+    }
+    #sheet .verify-item {
+      padding: 4px 0 4px 7px;
+      margin-bottom: 5px;
+      border-left: 3px solid #9a9788;
+      word-break: break-word;
+    }
+    #sheet .verify-item:last-child {
+      margin-bottom: 0;
+    }
+    #sheet .verify-item.ERROR {
+      border-left-color: var(--red, #C8341F);
+    }
+    #sheet .verify-item.WARN {
+      border-left-color: #b87d14;
+    }
+    #sheet .verify-item-head {
+      font-weight: 700;
+      color: var(--ink, #17181A);
+      margin-bottom: 1px;
+    }
+    #sheet .verify-item.ERROR .verify-item-head {
+      color: var(--red, #C8341F);
+    }
+    #sheet .verify-item.WARN .verify-item-head {
+      color: #8f5f0a;
+    }
+    #sheet .verify-ok {
+      color: #1f7a3f;
+      font-weight: 600;
+    }
+    
+    
   `;
   document.head.appendChild(style);
 }
@@ -1444,36 +1516,62 @@ function start(spec, shapeMat, rodMat, threadMat){
   document.getElementById('placardMeta').textContent =
     `${countShapes(spec.root)} elements · ${verification.physicalTotals.totalMassGrams.toFixed(1)} g · Verify: ${verification.status}`;
 
-  if(spec.buildSheet){
+  // here
+  if(spec.buildSheet || verification.issues.length > 0){
     const mmPerUnit = verification.materialsUsed.mmPerUnit;
     const rows = buildSheet(spec.root, [], mmPerUnit);
     const f1 = v => v.toFixed(1);
     const f2 = v => v.toFixed(2);
     const sheet = document.createElement('div');
     sheet.id = 'sheet';
-    sheet.innerHTML =
-      '<p class="title">Build sheet</p>' +
-      '<table>' +
-        '<tr>' +
-          '<th>leaf</th>' +
-          '<th>length (mm)</th>' +
-          '<th>wt (g)</th>' +
-          '<th>hang from fat end (mm)</th>' +
-          '<th>tilt (deg)</th>' +
-        '</tr>' +
-        rows.map(r =>
-          `<tr>` +
-            `<td>${r.id}</td>` +
-            `<td>${f1(r.lengthMm)}</td>` +
-            `<td>${f2(r.weightG)}</td>` +
-            `<td>${f1(r.fromEndMm)}</td>` +
-            `<td>${f1(Math.abs(r.tiltDeg))}°</td>` +
-          `</tr>`
-        ).join('') +
-      '</table>' +
-      `<p class="meta">scale = ${mmPerUnit} mm/unit; length = tip to base (mm); wt = physical mass including wood, glue &amp; finish (g); hang = distance along the leaf from the base end to where the thread ties (mm)</p>`;
+
+    let html = '';
+    if(spec.buildSheet){
+      html +=
+        '<p class="title">Build sheet</p>' +
+        '<table>' +
+          '<tr>' +
+            '<th>leaf</th>' +
+            '<th>len (mm)</th>' +
+            '<th>wt (g)</th>' +
+            '<th>hang (mm)</th>' +
+            '<th>tilt (deg)</th>' +
+          '</tr>' +
+          rows.map(r =>
+            `<tr>` +
+              `<td>${r.id}</td>` +
+              `<td>${f1(r.lengthMm)}</td>` +
+              `<td>${f2(r.weightG)}</td>` +
+              `<td>${f1(r.fromEndMm)}</td>` +
+              `<td>${f1(Math.abs(r.tiltDeg))}°</td>` +
+            `</tr>`
+          ).join('') +
+        '</table>' +
+        `<p class="meta">scale = ${mmPerUnit} mm/unit; len = tip to base; hang = thread tie distance from fat end</p>`;
+    }
+
+    const statusCls = verification.status.toLowerCase();
+    const issueItems = verification.issues.length === 0
+      ? `<div class="verify-ok">All ${verification.physicalTotals.nodeCount} components passed material &amp; stability checks.</div>`
+      : verification.issues.map(iss =>
+          `<div class="verify-item ${iss.severity}">` +
+            `<div class="verify-item-head">[${iss.severity}] ${iss.nodeId} &middot; ${iss.category}</div>` +
+            `<div>${iss.message}</div>` +
+          `</div>`
+        ).join('');
+
+    html +=
+      `<div class="verify-section">` +
+        `<div class="verify-header">` +
+          `<span>Verification (${verification.errorCount} err, ${verification.warnCount} warn)</span>` +
+          `<span class="verify-badge ${statusCls}">${verification.status}</span>` +
+        `</div>` +
+        `<div class="verify-pane">${issueItems}</div>` +
+      `</div>`;
+
+    sheet.innerHTML = html;
     document.body.appendChild(sheet);
-    console.table(rows);
+    if(spec.buildSheet) console.table(rows);
   }
 
   const camSlider = document.getElementById('camSlider');
