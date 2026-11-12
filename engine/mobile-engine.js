@@ -109,6 +109,23 @@
               // minimum required ratio of knotted breaking strength to suspended load
      }
 
+   4. Dynamic loads, swing clearance & hole spacing (optional; put on `spec` or the `options` argument):
+     maxSwingDeg: <number, default 30>
+              // worst pendulum swing; dynamic load factor = 3 - 2*cos(angle) (1.27 at 30 deg)
+     dynamicLoadFactor: <number, default derived from maxSwingDeg>
+              // multiplies every load check (string, tear-out, bearing, rod bending, tie grooves); sag stays static
+     clearanceSwingDeg: <number, default 5>
+              // string sway assumed when checking whether neighbouring parts can meet
+     minSwingClearanceMm: <number, default 5>
+              // required gap between parts whose spin sweeps / strings could bring them together
+   shapeMat also takes:
+     pinholeDiameterMm: <default max(0.6, 2 x thread diameter)>
+     minHoleSpacingMm:  <default 2 x minEdgeMarginMm>  // centre-to-centre between hang/child holes on one sheet
+   rodMat also takes:
+     grooveDepthMm:   <default min(0.25 x diameter, max(0.5, 2 x thread diameter))>  // groove_tied ring groove
+     grooveKt:        <default 1.3>   // notch allowance on the reduced section
+     minTieSpacingMm: <default groove: max(3, 1.5 x D); drilled: max(5 x hole dia, 2 x D)>
+
    EXAMPLE (Standard Craft-Store Balsa, 1/8" Pine Dowel, & Common Thread):
      const shapeMat = {
        material: 'balsa',
@@ -668,7 +685,13 @@ function shapeFrame(node){
   // raw(x,y): flat point -> physical position (x right, y DOWN, z toward viewer),
   // before slope, spin and camera. Used to solve the hanging equilibrium.
   const raw = (x,y)=> rollPitch0(bendPoint(x,y));
-  return { kappa, cA, sA, orient, point, raw };
+  // phys(x,y): physical offset from the string end (attach point) after bend, roll, pitch and slope,
+  // BEFORE spin and camera. X right, Y down, Z toward viewer. Used for swing-clearance geometry.
+  const phys = (x,y)=>{
+    const p = rollPitch(bendPoint(x,y));
+    return [p[0]-A3[0], p[1]-A3[1], p[2]-A3[2]];
+  };
+  return { kappa, cA, sA, orient, point, raw, phys };
 }
 
 function shadePct(n){ // world normal -> lighten/darken percent (two-sided)
@@ -840,6 +863,13 @@ function normalizeMaterialParams(spec, shapeArg, rodArg, threadArg, optionsArg){
   };
 
   const mmPerUnit = optIn.mmPerUnit || sIn.mmPerUnit || (spec && spec.mmPerUnit) || 2.0;
+  const opt = (k, def)=> optIn[k] !== undefined ? optIn[k] : (spec && spec[k] !== undefined ? spec[k] : def);
+  // Dynamic load factor: a pendulum swinging through amplitude th0 pulls its string with T = m*g*(3 - 2cos th0) at the bottom.
+  const maxSwingDeg = opt('maxSwingDeg', 30);
+  const dlfIn = opt('dynamicLoadFactor', undefined);
+  const dynamicLoadFactor = Math.max(1, dlfIn !== undefined ? dlfIn : 3 - 2*Math.cos(maxSwingDeg*Math.PI/180));
+  const clearanceSwingDeg = opt('clearanceSwingDeg', 5);
+  const minSwingClearanceMm = opt('minSwingClearanceMm', 5);
 
   // 1. Shape material normalization (balsa + thickness + layers + grain/glue/hole params)
   const shapeKey = pick(MATERIAL_PRESETS.shapes, sIn.material || sIn.type || 'balsa', 'balsa', 'shape material');
@@ -910,7 +940,18 @@ function normalizeMaterialParams(spec, shapeArg, rodArg, threadArg, optionsArg){
     safetyFactor: tIn.safetyFactor || 4.0
   };
 
-  return { mmPerUnit, shapes, rods, thread: threads, warnings };
+  // Parameters that depend on more than one material group
+  shapes.pinholeDiameterMm = sIn.pinholeDiameterMm !== undefined ? sIn.pinholeDiameterMm : Math.max(0.6, 2 * threads.diameterMm);
+  shapes.minHoleSpacingMm  = sIn.minHoleSpacingMm  !== undefined ? sIn.minHoleSpacingMm  : 2 * shapes.minEdgeMarginMm;
+  rods.grooveDepthMm = rIn.grooveDepthMm !== undefined ? rIn.grooveDepthMm
+                     : Math.min(0.25 * rods.diameterMm, Math.max(0.5, 2 * threads.diameterMm));
+  rods.grooveKt = rIn.grooveKt || 1.3;
+  rods.minTieSpacingMm = rIn.minTieSpacingMm !== undefined ? rIn.minTieSpacingMm
+                       : (rods.attachmentMethod === 'drilled_hole' ? Math.max(5 * rods.holeDiameterMm, 2 * rods.diameterMm)
+                                                                   : Math.max(3, 1.5 * rods.diameterMm));
+
+  return { mmPerUnit, shapes, rods, thread: threads, warnings,
+           dynamicLoadFactor, maxSwingDeg, clearanceSwingDeg, minSwingClearanceMm };
 }
 
 function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
@@ -921,6 +962,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
   const cfg = normalizeMaterialParams(spec, shapeMat, rodMat, threadMat, options);
   const { mmPerUnit, shapes: S, rods: R, thread: T } = cfg;
   const g_accel = 9.80665; // m/s^2 (N per kg)
+  const DLF = cfg.dynamicLoadFactor; // swing amplification applied to every load check
 
   // Ids, masses (grams), hang tilts and balance points all come from this one material model,
   // so the simulator, build sheet and verifier can never disagree about weight.
@@ -1118,14 +1160,15 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
         // Shear tear-out capacity F_tear = 2 * margin * thickness * tau
         const reinfFactor = (S.holeReinforced ? 2.8 : 1.0) * (S.crossGrainLayers && S.layers > 1 ? 1.8 : 1.0);
         const tearOutCapacityN = 2 * Math.max(0.2, topMarginMm) * S.totalThicknessMm * S.tauShearMPa * reinfFactor;
-        if(totalLoadN > tearOutCapacityN / 2.5){
-          addIssue(totalLoadN > tearOutCapacityN / SF_FAIL ? 'ERROR' : 'WARN', 'hole_tearout_stress', nodeId,
-            `Suspension load (${totalMassGrams.toFixed(1)} g) at upper pinhole of "${nodeId}" approaches ${S.material} tear-out strength (safety factor ${(tearOutCapacityN/Math.max(1e-5, totalLoadN)).toFixed(1)}x).`,
-            { loadN: totalLoadN, tearOutCapacityN }
+        const designLoadN = totalLoadN * DLF; // static weight x dynamic (swing) factor
+        if(designLoadN > tearOutCapacityN / 2.5){
+          addIssue(designLoadN > tearOutCapacityN / SF_FAIL ? 'ERROR' : 'WARN', 'hole_tearout_stress', nodeId,
+            `Suspension load (${totalMassGrams.toFixed(1)} g x ${DLF.toFixed(2)} dynamic) at upper pinhole of "${nodeId}" approaches ${S.material} tear-out strength (safety factor ${(tearOutCapacityN/Math.max(1e-5, designLoadN)).toFixed(1)}x).`,
+            { loadN: totalLoadN, designLoadN, dynamicLoadFactor: DLF, tearOutCapacityN }
           );
         }
         // Check "cheese-wire" bearing pressure of ultra-thin thread cutting into the sheet
-        const bearingStressMPa = totalLoadN / (Math.max(0.08, T.diameterMm) * S.totalThicknessMm);
+        const bearingStressMPa = designLoadN / (Math.max(0.08, T.diameterMm) * S.totalThicknessMm);
         const maxBearingMPa = S.tauShearMPa * 1.6 * reinfFactor;
         if(bearingStressMPa > maxBearingMPa){
           addIssue('WARN', 'thread_cheesewire', nodeId,
@@ -1151,6 +1194,29 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
             `Lower attachment hole for child "${cId}" on "${nodeId}" is only ${cMarginMm.toFixed(2)} mm from the edge (recommended >= ${S.minEdgeMarginMm} mm); fragile tip may tear.`,
             { childId: cId, point: cPt, marginMm: cMarginMm }
           );
+        }
+      }
+
+      // 5b. Hole-to-hole spacing: the upper hang hole and every child's lower hole share one sheet.
+      //     Centres closer than the required spacing leave a thin ligament that splits or tears between them.
+      {
+        const holes = [{ label: 'hang hole', pt: attachPt }];
+        for(const cr of childResults) holes.push({ label: `hole for "${cr.report.nodeId}"`, pt: childFlatPoint(node, cr.link) });
+        for(let a = 0; a < holes.length; a++){
+          for(let b = a + 1; b < holes.length; b++){
+            const spMm = Math.hypot(holes[a].pt[0] - holes[b].pt[0], holes[a].pt[1] - holes[b].pt[1]) * mmPerUnit;
+            if(spMm < S.pinholeDiameterMm + 0.1){
+              addIssue('ERROR', 'holes_overlap', nodeId,
+                `On "${nodeId}" the ${holes[a].label} and the ${holes[b].label} are ${spMm.toFixed(2)} mm apart; the ${S.pinholeDiameterMm.toFixed(2)} mm pinholes would run into each other.`,
+                { spacingMm: spMm, pinholeDiameterMm: S.pinholeDiameterMm }
+              );
+            } else if(spMm < S.minHoleSpacingMm){
+              addIssue('WARN', 'hole_spacing_tight', nodeId,
+                `On "${nodeId}" the ${holes[a].label} and the ${holes[b].label} are ${spMm.toFixed(2)} mm apart (recommended >= ${S.minHoleSpacingMm.toFixed(1)} mm); the ligament between them may split or tear.`,
+                { spacingMm: spMm, minHoleSpacingMm: S.minHoleSpacingMm }
+              );
+            }
+          }
         }
       }
 
@@ -1244,6 +1310,28 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
           { enginePivotMm: enginePivotUnits * mmPerUnit, truePivotMm: truePivotUnits * mmPerUnit, leanDeg: leanRad * 180 / Math.PI }
         );
       }
+      // Tie spacing along the rod (the pivot tie plus one tie per child). Ties that close split the dowel
+      // between them or make the knots foul each other. Skipped for under-populated rods (already flagged).
+      if((node.children || []).length >= 2){
+        const ties = [{ label: 'pivot', x: enginePivotUnits }];
+        for(const cr of childResults) ties.push({ label: `"${cr.report.nodeId}"`, x: cr.link.offset });
+        ties.sort((p, q) => p.x - q.x);
+        const overlapMm = R.attachmentMethod === 'drilled_hole' ? R.holeDiameterMm + 0.1 : 1.0;
+        for(let k = 1; k < ties.length; k++){
+          const spMm = (ties[k].x - ties[k-1].x) * mmPerUnit;
+          if(spMm < overlapMm){
+            addIssue('ERROR', 'ties_overlap', nodeId,
+              `On rod "${nodeId}" the ${ties[k-1].label} tie and the ${ties[k].label} tie are ${spMm.toFixed(2)} mm apart; they cannot be tied separately.`,
+              { spacingMm: spMm }
+            );
+          } else if(spMm < R.minTieSpacingMm){
+            addIssue('WARN', 'tie_spacing_tight', nodeId,
+              `On rod "${nodeId}" the ${ties[k-1].label} tie and the ${ties[k].label} tie are ${spMm.toFixed(2)} mm apart (recommended >= ${R.minTieSpacingMm.toFixed(1)} mm for a ${R.diameterMm} mm ${R.material} rod); the dowel may split between them.`,
+              { spacingMm: spMm, minTieSpacingMm: R.minTieSpacingMm }
+            );
+          }
+        }
+      }
       if(selfMassGrams > childrenMassGrams * 1.5 && childrenMassGrams > 0){
         addIssue('WARN', 'heavy_rod_vs_balsa', nodeId,
           `Rod "${nodeId}" (${selfMassGrams.toFixed(2)} g of ${R.material}) weighs more than 1.5x the entire payload hanging from it (${childrenMassGrams.toFixed(2)} g); consider a thinner dowel.`,
@@ -1288,7 +1376,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
         }
       }
 
-      const maxMomentNmm = Math.max(leftMomentNmm, rightMomentNmm);
+      const maxMomentNmm = Math.max(leftMomentNmm, rightMomentNmm) * DLF; // static moment x dynamic factor
       const maxBendStressMPa = (maxMomentNmm * radiusMm) / netI_Mm4;
       const allowableRodStressMPa = R.morMPa / 3.0; // 3x safety factor for wood knots/grain runout
 
@@ -1297,6 +1385,48 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
           `${R.name} "${nodeId}" bending stress (${maxBendStressMPa.toFixed(1)} MPa) exceeds safe working limit (${allowableRodStressMPa.toFixed(1)} MPa).`,
           { maxBendStressMPa, allowableRodStressMPa }
         );
+      }
+
+      // Groove weakening. A tied groove cuts a ring out of the dowel, so at every tie the section is the
+      // reduced core (diameter D - 2 x depth) with a notch allowance Kt. The pivot tie sees the largest moment,
+      // so this is usually the weakest section on the rod. (drilled_hole rods are covered by the hole check above.)
+      let maxGrooveStressMPa = 0;
+      if(R.attachmentMethod === 'groove_tied' && R.grooveDepthMm > 0){
+        const dNet = R.diameterMm - 2 * R.grooveDepthMm;
+        if(dNet <= 0.2 * R.diameterMm){
+          addIssue('ERROR', 'rod_groove_too_deep', nodeId,
+            `A ${R.grooveDepthMm.toFixed(2)} mm groove leaves only a ${Math.max(0, dNet).toFixed(2)} mm core in the ${R.diameterMm} mm ${R.material} rod "${nodeId}".`,
+            { grooveDepthMm: R.grooveDepthMm, coreDiameterMm: dNet }
+          );
+        } else {
+          const coreI = (Math.PI * (dNet ** 4)) / 64;
+          // bending moment (N*mm, static) at distance s from the pivot on one side (side = -1 left, +1 right)
+          const momentAt = (side, s)=>{
+            const armEnd = side < 0 ? leftArmMm : rightArmMm;
+            let M = 0.5 * qRodNPerMm * (Math.max(0, armEnd - s) ** 2);
+            for(const cr of childResults){
+              const out = (cr.link.offset - enginePivotUnits) * mmPerUnit * side; // distance out along this side
+              if(out >= s - 1e-9) M += ((cr.report.totalMassGrams * 1e-3) * g_accel) * (out - s);
+            }
+            return M;
+          };
+          let where = 'pivot';
+          const probe = (side, s, label)=>{
+            const sigma = R.grooveKt * (momentAt(side, s) * DLF) * (dNet / 2) / coreI;
+            if(sigma > maxGrooveStressMPa){ maxGrooveStressMPa = sigma; where = label; }
+          };
+          probe(-1, 0, 'pivot'); probe(1, 0, 'pivot');
+          for(const cr of childResults){
+            const armMm = (cr.link.offset - enginePivotUnits) * mmPerUnit;
+            probe(armMm < 0 ? -1 : 1, Math.abs(armMm), `"${cr.report.nodeId}"`);
+          }
+          if(maxGrooveStressMPa > allowableRodStressMPa){
+            addIssue(maxGrooveStressMPa > R.morMPa / SF_FAIL ? 'ERROR' : 'WARN', 'rod_groove_weakening', nodeId,
+              `Tie groove (${R.grooveDepthMm.toFixed(2)} mm deep) at the ${where} tie leaves a ${dNet.toFixed(2)} mm core in the ${R.diameterMm} mm ${R.material} rod "${nodeId}": ${maxGrooveStressMPa.toFixed(1)} MPa exceeds the safe ${allowableRodStressMPa.toFixed(1)} MPa. Use a shallower nick, a thicker dowel, or glue a bead instead of cutting.`,
+              { maxGrooveStressMPa, allowableRodStressMPa, grooveDepthMm: R.grooveDepthMm, coreDiameterMm: dNet, where }
+            );
+          }
+        }
       }
 
       const maxDeflMm = Math.max(leftDeflMm, rightDeflMm);
@@ -1315,7 +1445,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
         enginePivotMm: enginePivotUnits * mmPerUnit,
         truePivotMm: truePivotUnits * mmPerUnit,
         pivotOffsetMm, leanDeg: leanRad * 180 / Math.PI,
-        maxDeflMm, maxBendStressMPa
+        maxDeflMm, maxBendStressMPa, maxGrooveStressMPa
       };
       nodeReports.push(rep);
       checkIncomingString(nodeId, parentLabel, incomingStringUnits, totalMassGrams, totalLoadN);
@@ -1325,11 +1455,12 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
 
   function checkIncomingString(nodeId, parentLabel, stringUnits, supportedMassGrams, tensionN){
     const stringLengthMm = (stringUnits || 0) * mmPerUnit;
-    if(tensionN > threadSafeWorkingN){
-      const actualSF = threadKnottedBreakN / Math.max(1e-6, tensionN);
+    const dynamicN = tensionN * DLF; // static weight x swing amplification
+    if(dynamicN > threadSafeWorkingN){
+      const actualSF = threadKnottedBreakN / Math.max(1e-6, dynamicN);
       addIssue(actualSF < SF_FAIL ? 'ERROR' : 'WARN', 'thread_overload', nodeId,
-        `String above "${nodeId}" carries ${supportedMassGrams.toFixed(1)} g (safety factor ${actualSF.toFixed(1)}x vs knotted break strength ${(threadKnottedBreakN/g_accel*1000).toFixed(0)} g for ${T.diameterMm} mm ${T.name}).`,
-        { supportedMassGrams, safetyFactor: actualSF, recommendedSafetyFactor: T.safetyFactor }
+        `String above "${nodeId}" carries ${supportedMassGrams.toFixed(1)} g x ${DLF.toFixed(2)} dynamic (safety factor ${actualSF.toFixed(1)}x vs knotted break strength ${(threadKnottedBreakN/g_accel*1000).toFixed(0)} g for ${T.diameterMm} mm ${T.name}).`,
+        { supportedMassGrams, safetyFactor: actualSF, recommendedSafetyFactor: T.safetyFactor, dynamicLoadFactor: DLF }
       );
     }
     // Check elastic stretch
@@ -1351,7 +1482,92 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
     }
   }
 
+  // Swing clearance. Every part spins about its own string, so it sweeps a vertical cylinder; the strings
+  // above it carry it round (each ancestor's spin moves the next attach point), sway as pendulums, and rods
+  // lean. Two parts can meet when their sweeps overlap horizontally AND their vertical extents overlap.
+  // Anything above the pair's lowest common ancestor turns both together, so only the chain below it counts.
+  function checkSwingClearance(){
+    const SW = Math.sin(cfg.clearanceSwingDeg * Math.PI / 180);
+    const minClear = cfg.minSwingClearanceMm / mmPerUnit;
+    const recs = [];
+    (function walk(node, path, edges, X, Z, Y){
+      const rec = { node, id: node._id, path: path.concat([node]), edges, X, Z, Y };
+      if(node.type === 'shape'){
+        const fr = shapeFrame(node);
+        const ol = node._outline || (node._outline = outlinePoints(node.shape, node.size));
+        let rho = 0, lo = Infinity, hi = -Infinity;
+        for(const [x, y] of ol){
+          const p = fr.phys(x, y);
+          rho = Math.max(rho, Math.hypot(p[0], p[2]));
+          lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]);
+        }
+        rec.fr = fr; rec.rho = rho; rec.yLo = lo; rec.yHi = hi;
+      } else {
+        const [mn, mx] = rodExtent(node), piv = node._pivot || 0;
+        const lean = Math.abs(node._leanBase || 0) + SWAY_AMPLITUDE;
+        const arm = Math.max(Math.abs(mn - piv), Math.abs(mx - piv));
+        const rr = R.diameterMm / 2 / mmPerUnit;
+        rec.rho = arm * Math.cos(lean) + rr;
+        rec.yHi = arm * Math.sin(lean) + rr; rec.yLo = -rec.yHi;
+      }
+      recs.push(rec);
+      for(const c of (node.children || [])){
+        let vx, vz, vy, yTol = 0;
+        if(node.type === 'shape'){
+          const q = childFlatPoint(node, c), p = rec.fr.phys(q[0], q[1]);
+          vx = p[0]; vz = p[2]; vy = p[1];
+        } else {
+          const lx = c.offset - (node._pivot || 0), lean = node._leanBase || 0;
+          vx = lx * Math.cos(lean); vz = 0; vy = -lx * Math.sin(lean);
+          yTol = Math.abs(lx) * SWAY_AMPLITUDE; // the rod rocks, so one end rises while the other drops
+        }
+        const len = c.string || 0;
+        walk(c.node, rec.path, edges.concat([{ m: Math.hypot(vx, vz), len, yTol }]), X + vx, Z + vz, Y + vy + len);
+      }
+    })(spec.root, [], [], 0, 0, 0);
+
+    for(let i = 0; i < recs.length; i++){
+      for(let j = i + 1; j < recs.length; j++){
+        const A = recs[i], B = recs[j];
+        let d = 0; // depth of the lowest common ancestor
+        while(d + 1 < A.path.length && d + 1 < B.path.length && A.path[d + 1] === B.path[d + 1]) d++;
+        const tail = (r)=>{
+          let spin = 0, sway = 0, vtol = 0;
+          r.edges.forEach((e, k)=>{
+            if(k >= d){ sway += e.len * SW; vtol += e.yTol; }   // own string sways, shared rod rocks
+            if(k >= d + 1) spin += e.m;                          // spinners strictly below the ancestor
+          });
+          return { spin, sway, vtol };
+        };
+        const a = tail(A), b = tail(B);
+        const D = Math.hypot(A.X - B.X, A.Z - B.Z);
+        const slack = a.spin + a.sway + b.spin + b.sway;
+        const hGap = D - A.rho - B.rho - slack;
+        const vGap = Math.max((B.Y + B.yLo - b.vtol) - (A.Y + A.yHi + a.vtol),
+                              (A.Y + A.yLo - a.vtol) - (B.Y + B.yHi + b.vtol));
+        if(hGap >= minClear || vGap >= minClear) continue;
+        const hMm = hGap * mmPerUnit, vMm = vGap * mmPerUnit;
+        const detail = { a: A.id, b: B.id, horizontalGapMm: hMm, verticalGapMm: vMm,
+                         sweepRadiusMm: [A.rho * mmPerUnit, B.rho * mmPerUnit], slackMm: slack * mmPerUnit };
+        if(hGap < 0 && vGap < 0){
+          // one part's string line passes inside the other's sweep: contact is unavoidable at some spin phase
+          const axisInside = (D - slack) <= Math.max(A.rho, B.rho);
+          addIssue(axisInside ? 'ERROR' : 'WARN', axisInside ? 'swing_collision' : 'swing_collision_risk', A.id,
+            `"${A.id}" and "${B.id}" ${axisInside ? 'will' : 'can'} hit each other while spinning or swaying: their sweeps overlap by ${(-hMm).toFixed(1)} mm horizontally and their heights overlap by ${(-vMm).toFixed(1)} mm.`,
+            detail
+          );
+        } else {
+          addIssue('WARN', 'swing_clearance_tight', A.id,
+            `"${A.id}" and "${B.id}" keep only ${Math.max(hMm, vMm).toFixed(1)} mm of clearance while spinning or swaying (recommended >= ${cfg.minSwingClearanceMm} mm).`,
+            detail
+          );
+        }
+      }
+    }
+  }
+
   const rootReport = inspectNode(spec.root, 0, spec.string || 60, 'ceiling');
+  checkSwingClearance();
   const errorCount = issues.filter(i => i.severity === 'ERROR').length;
   const warnCount  = issues.filter(i => i.severity === 'WARN').length;
   const status = errorCount > 0 ? 'FAIL' : (warnCount > 0 ? 'WARN' : 'PASS');
@@ -1364,6 +1580,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
     materialsUsed: cfg,
     physicalTotals: {
       totalMassGrams: rootReport.totalMassGrams,
+      dynamicLoadFactor: DLF,
       nodeCount: nodeReports.length,
       shapeCount: nodeReports.filter(n => n.type === 'shape').length,
       rodCount: nodeReports.filter(n => n.type === 'rod').length
