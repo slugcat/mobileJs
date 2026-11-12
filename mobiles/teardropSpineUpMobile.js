@@ -46,8 +46,8 @@ const threadMat = {
 (function(){
   const BEND_TOP = 1.0;
   const BEND_BOT = 1.25;
-  const BASE_TILT = 18; // tilt deg of top shape
-  const TILT = 16; // BASE_TILT plus tilt deg per level
+  const BASE_TILT = 16; // tilt deg of top shape
+  const TILT = 15; // BASE_TILT plus tilt deg per level
 
   // dark green, each step lighter: parent < big child < small child (< its own children ...)
   function green(step){

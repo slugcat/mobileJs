@@ -1482,33 +1482,110 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
     }
   }
 
-  // Swing clearance. Every part spins about its own string, so it sweeps a vertical cylinder; the strings
-  // above it carry it round (each ancestor's spin moves the next attach point), sway as pendulums, and rods
-  // lean. Two parts can meet when their sweeps overlap horizontally AND their vertical extents overlap.
-  // Anything above the pair's lowest common ancestor turns both together, so only the chain below it counts.
+  // Swing clearance. Every part spins about its own string, the strings above it carry it round (each ancestor's
+  // spin moves the next attach point), strings sway as pendulums, and rods lean. Anything above the pair's lowest
+  // common ancestor (LCA) turns both parts together, so only the chain below the LCA adds slack.
+  //
+  // Each part is compared by what it really occupies at each height, not by one bounding cylinder, so a tilted or
+  // bent sheet is a thin diagonal slab and not a fat drum:
+  //   - a part that spins freely about its own string sweeps a RING PROFILE: for each height bin, the radial
+  //     intervals (distance from its string axis) its surface occupies there.
+  //   - a part that is the LCA of the other turns rigidly with the other's hang point, so it is NOT swept round
+  //     its own axis; its actual fixed geometry is compared with the other's ring profile about that other axis.
+  // Overlap with zero slack is a certain hit (ERROR). Overlap only once string sway / intermediate spin is
+  // allowed for is a risk (WARN); less than minSwingClearanceMm of room is a tight-clearance WARN.
   function checkSwingClearance(){
     const SW = Math.sin(cfg.clearanceSwingDeg * Math.PI / 180);
     const minClear = cfg.minSwingClearanceMm / mmPerUnit;
+    const BIN = Math.max(minClear / 4, 0.25);   // height / radius resolution, simulator units
+    const MAX_CELLS = 100000;                   // cap on grid cells sampled per sheet
     const recs = [];
+
+    // Surface of a sheet in its own frame (X right, Y down, Z toward viewer, origin at the string end).
+    // The bend is a cylinder (isometric), so flat-grid spacing `step` bounds the 3-D gap between samples.
+    function surfacePoints(node, fr){
+      const ol = node._outline || (node._outline = outlinePoints(node.shape, node.size));
+      let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+      for(const [x, y] of ol){ x0 = Math.min(x0, x); x1 = Math.max(x1, x); y0 = Math.min(y0, y); y1 = Math.max(y1, y); }
+      let step = BIN / 2;
+      const cells = ((x1 - x0) / step) * ((y1 - y0) / step);
+      if(cells > MAX_CELLS) step *= Math.sqrt(cells / MAX_CELLS);
+      const pts = [];
+      for(let y = y0 + step / 2; y < y1; y += step){   // scanline fill, same even-odd rule as pointInPoly
+        const xs = [];
+        for(let i = 0; i < ol.length; i++){
+          const p = ol[i], q = ol[(i + 1) % ol.length];
+          if((p[1] > y) !== (q[1] > y)) xs.push(p[0] + (y - p[1]) * (q[0] - p[0]) / (q[1] - p[1]));
+        }
+        xs.sort((u, v) => u - v);
+        for(let k = 0; k + 1 < xs.length; k += 2)
+          for(let x = x0 + step / 2 + Math.ceil((xs[k] - x0 - step / 2) / step) * step; x <= xs[k + 1]; x += step)
+            pts.push(fr.phys(x, y));
+      }
+      for(let i = 0; i < ol.length; i++){          // the cut edge, densified
+        const a = ol[i], b = ol[(i + 1) % ol.length];
+        const n = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / step));
+        for(let k = 0; k < n; k++) pts.push(fr.phys(a[0] + (b[0] - a[0]) * k / n, a[1] + (b[1] - a[1]) * k / n));
+      }
+      return { pts, step };
+    }
+
+    // Ring profile of a point set: per height bin, merged radial intervals about the vertical axis.
+    function ringProfile(pts, pad, bin){
+      const cellsMap = new Map();
+      let rho = 0, yLo = Infinity, yHi = -Infinity;
+      for(const p of pts){
+        const r = Math.hypot(p[0], p[2]), y = p[1];
+        const iy = Math.floor(y / bin), ir = Math.floor(r / bin), key = (iy + 100000) * 100000 + ir;
+        const c = cellsMap.get(key);
+        if(!c) cellsMap.set(key, [r, r, y, y, iy, ir]);
+        else { if(r < c[0]) c[0] = r; if(r > c[1]) c[1] = r; if(y < c[2]) c[2] = y; if(y > c[3]) c[3] = y; }
+        if(r > rho) rho = r;
+        if(y < yLo) yLo = y;
+        if(y > yHi) yHi = y;
+      }
+      const byRow = new Map();
+      for(const c of cellsMap.values()){
+        let row = byRow.get(c[4]);
+        if(!row){ row = []; byRow.set(c[4], row); }
+        row.push(c);
+      }
+      const rows = [], index = new Map();
+      for(const [iy, cs] of byRow){
+        cs.sort((p, q) => p[5] - q[5]);
+        const iv = [];
+        let cur = [cs[0][0], cs[0][1]], last = cs[0][5], lo = cs[0][2], hi = cs[0][3];
+        for(let k = 1; k < cs.length; k++){
+          lo = Math.min(lo, cs[k][2]); hi = Math.max(hi, cs[k][3]);
+          if(cs[k][5] <= last + 1){ cur[0] = Math.min(cur[0], cs[k][0]); cur[1] = Math.max(cur[1], cs[k][1]); }
+          else { iv.push([Math.max(0, cur[0] - pad), cur[1] + pad]); cur = [cs[k][0], cs[k][1]]; }
+          last = cs[k][5];
+        }
+        iv.push([Math.max(0, cur[0] - pad), cur[1] + pad]);
+        const row = { lo: lo - pad, hi: hi + pad, iv };
+        rows.push(row); index.set(iy, row);
+      }
+      return { rows, index, bin, rho: rho + pad, yLo: yLo - pad, yHi: yHi + pad };
+    }
+
     (function walk(node, path, edges, X, Z, Y){
       const rec = { node, id: node._id, path: path.concat([node]), edges, X, Z, Y };
       if(node.type === 'shape'){
-        const fr = shapeFrame(node);
-        const ol = node._outline || (node._outline = outlinePoints(node.shape, node.size));
-        let rho = 0, lo = Infinity, hi = -Infinity;
-        for(const [x, y] of ol){
-          const p = fr.phys(x, y);
-          rho = Math.max(rho, Math.hypot(p[0], p[2]));
-          lo = Math.min(lo, p[1]); hi = Math.max(hi, p[1]);
-        }
-        rec.fr = fr; rec.rho = rho; rec.yLo = lo; rec.yHi = hi;
+        const fr = shapeFrame(node), sp = surfacePoints(node, fr);
+        rec.fr = fr; rec.pts = sp.pts; rec.pad = 0;
+        rec.prof = ringProfile(sp.pts, 0, Math.max(BIN, 2 * sp.step));
       } else {
+        // a rod rocks about its balance point: sample it at lean +/- (static lean + sway)
         const [mn, mx] = rodExtent(node), piv = node._pivot || 0;
-        const lean = Math.abs(node._leanBase || 0) + SWAY_AMPLITUDE;
-        const arm = Math.max(Math.abs(mn - piv), Math.abs(mx - piv));
-        const rr = R.diameterMm / 2 / mmPerUnit;
-        rec.rho = arm * Math.cos(lean) + rr;
-        rec.yHi = arm * Math.sin(lean) + rr; rec.yLo = -rec.yHi;
+        const L = Math.abs(node._leanBase || 0) + SWAY_AMPLITUDE;
+        const n = Math.max(2, Math.ceil((mx - mn) / (BIN / 2))), pts = [];
+        for(const lean of [-L, L])
+          for(let k = 0; k <= n; k++){
+            const lx = (mn - piv) + (mx - mn) * k / n;
+            pts.push([lx * Math.cos(lean), -lx * Math.sin(lean), 0]);
+          }
+        rec.pts = pts; rec.pad = R.diameterMm / 2 / mmPerUnit;
+        rec.prof = ringProfile(pts, rec.pad, BIN);
       }
       recs.push(rec);
       for(const c of (node.children || [])){
@@ -1526,6 +1603,53 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
       }
     })(spec.root, [], [], 0, 0, 0);
 
+    // Two free spinners: rings about axes D apart, which the slack can move D +/- slack. Worst (smallest) of
+    // max(horizontal gap, vertical gap) over every pair of height bins that could interact.
+    function ringGap(A, B, D, slack, vt){
+      let best = null;
+      for(const ra of A.prof.rows){
+        const a0 = A.Y + ra.lo, a1 = A.Y + ra.hi;
+        for(const rb of B.prof.rows){
+          const v = Math.max((B.Y + rb.lo) - (a1 + vt), (a0 - vt) - (B.Y + rb.hi));
+          if(v >= minClear) continue;
+          let h = Infinity;
+          for(const [p1, p2] of ra.iv) for(const [q1, q2] of rb.iv){
+            const lo0 = Math.max(p1 - q2, q1 - p2), hi0 = p2 + q2; // axis separations at which the two annuli touch
+            h = Math.min(h, Math.max(lo0 - (D + slack), (D - slack) - hi0));
+          }
+          const c = Math.max(h, v);
+          if(!best || c < best.clear) best = { clear: c, h, v };
+        }
+      }
+      return best;
+    }
+
+    // A is the LCA: its fixed geometry turns with B's hang point. Each point of A against B's ring profile.
+    function rigidGap(A, B, slack, vt){
+      const dX = B.X - A.X, dZ = B.Z - A.Z, bp = B.prof;
+      const w = 1 + Math.ceil(A.pad / bp.bin);
+      let best = null;
+      for(const p of A.pts){
+        const rho = Math.hypot(p[0] - dX, p[2] - dZ);
+        if(rho - slack - bp.rho - A.pad >= minClear) continue;
+        const h0 = A.Y + p[1];
+        const i0 = Math.floor((h0 - B.Y - vt - minClear - A.pad) / bp.bin) - w;
+        const i1 = Math.floor((h0 - B.Y + vt + minClear + A.pad) / bp.bin) + w;
+        for(let i = i0; i <= i1; i++){
+          const rb = bp.index.get(i);
+          if(!rb) continue;
+          const v = Math.max((B.Y + rb.lo) - (h0 + vt), (h0 - vt) - (B.Y + rb.hi)) - A.pad;
+          if(v >= minClear) continue;
+          let h = Infinity;
+          for(const [q1, q2] of rb.iv) h = Math.min(h, Math.max(q1 - (rho + slack), (rho - slack) - q2));
+          h -= A.pad;
+          const c = Math.max(h, v);
+          if(!best || c < best.clear) best = { clear: c, h, v };
+        }
+      }
+      return best;
+    }
+
     for(let i = 0; i < recs.length; i++){
       for(let j = i + 1; j < recs.length; j++){
         const A = recs[i], B = recs[j];
@@ -1541,19 +1665,25 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
         };
         const a = tail(A), b = tail(B);
         const D = Math.hypot(A.X - B.X, A.Z - B.Z);
+        const measure = (useSlack)=>{
+          if(A.path.length === d + 1) return rigidGap(A, B, useSlack ? b.spin + b.sway : 0, useSlack ? b.vtol : 0);
+          if(B.path.length === d + 1) return rigidGap(B, A, useSlack ? a.spin + a.sway : 0, useSlack ? a.vtol : 0);
+          return ringGap(A, B, D, useSlack ? a.spin + a.sway + b.spin + b.sway : 0, useSlack ? a.vtol + b.vtol : 0);
+        };
+        const worst = measure(true);                 // slack only ever brings parts closer
+        if(!worst || worst.clear >= minClear) continue;
+        const nominal = measure(false);
+        const certain = nominal && nominal.clear < 0;
+        const m = certain ? nominal : worst;
+        const hMm = m.h * mmPerUnit, vMm = m.v * mmPerUnit;
         const slack = a.spin + a.sway + b.spin + b.sway;
-        const hGap = D - A.rho - B.rho - slack;
-        const vGap = Math.max((B.Y + B.yLo - b.vtol) - (A.Y + A.yHi + a.vtol),
-                              (A.Y + A.yLo - a.vtol) - (B.Y + B.yHi + b.vtol));
-        if(hGap >= minClear || vGap >= minClear) continue;
-        const hMm = hGap * mmPerUnit, vMm = vGap * mmPerUnit;
         const detail = { a: A.id, b: B.id, horizontalGapMm: hMm, verticalGapMm: vMm,
-                         sweepRadiusMm: [A.rho * mmPerUnit, B.rho * mmPerUnit], slackMm: slack * mmPerUnit };
-        if(hGap < 0 && vGap < 0){
-          // one part's string line passes inside the other's sweep: contact is unavoidable at some spin phase
-          const axisInside = (D - slack) <= Math.max(A.rho, B.rho);
-          addIssue(axisInside ? 'ERROR' : 'WARN', axisInside ? 'swing_collision' : 'swing_collision_risk', A.id,
-            `"${A.id}" and "${B.id}" ${axisInside ? 'will' : 'can'} hit each other while spinning or swaying: their sweeps overlap by ${(-hMm).toFixed(1)} mm horizontally and their heights overlap by ${(-vMm).toFixed(1)} mm.`,
+                         sweepRadiusMm: [A.prof.rho * mmPerUnit, B.prof.rho * mmPerUnit], slackMm: slack * mmPerUnit,
+                         method: (A.path.length === d + 1 || B.path.length === d + 1) ? 'rigid ancestor vs swept ring' : 'swept rings' };
+        if(m.clear < 0){
+          // overlap with no slack at all: at some spin phase the parts occupy the same space
+          addIssue(certain ? 'ERROR' : 'WARN', certain ? 'swing_collision' : 'swing_collision_risk', A.id,
+            `"${A.id}" and "${B.id}" ${certain ? 'will' : 'can'} hit each other while spinning or swaying: at the worst height their swept volumes overlap by ${(-hMm).toFixed(1)} mm horizontally and ${(-vMm).toFixed(1)} mm vertically.`,
             detail
           );
         } else {
