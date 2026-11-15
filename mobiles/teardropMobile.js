@@ -58,9 +58,10 @@ const threadMat = {
   // The engine solves where each leaf's thread must tie (its attach point) so that
   // the leaf, with its children's weights, really hangs at that tilt. See the build sheet.
   // It also increases bend as it goes down.
-  function leaf(id, level, size, color, kids){
+  // stringLen = length of the string this leaf hangs from (its incoming string), simulator units.
+  function leaf(id, level, size, color, stringLen, kids){
     const bend = BEND_TOP + (BEND_BOT - BEND_TOP) * (level / 3);
-    return { id:id, type:'shape', shape:'ovate', size:size, color:color,
+    return { id:id, type:'shape', shape:'ovate', size:size, color:color, string:stringLen,
              orientation:90, targetSlope:-TILT*level, bend:bend, bendAxis:90,
              children:kids };
   }
@@ -68,8 +69,9 @@ const threadMat = {
 
   const FAT_ATTACH = 0.90; // inset 5% of total leaf length (0.10*s) from base edge
   const TIP_ATTACH = -0.82; // inset 9% of total leaf length (0.18*s) from pointed tip
-  const fat = (s, str, node) => ({ at:[0, s * FAT_ATTACH], string:str, node:node });
-  const tip = (s, str, node) => ({ at:[0, s * TIP_ATTACH], string:str, node:node });
+  // where a child hangs on its parent; the string length lives on the child (see leaf)
+  const fat = (s, node) => ({ at:[0, s * FAT_ATTACH], node:node });
+  const tip = (s, node) => ({ at:[0, s * TIP_ATTACH], node:node });
 
   const s0 = 120, s01 = s0*FAT, s02 = s0*TIP;
   const s021 = s02*FAT, s022 = s02*TIP;
@@ -78,17 +80,16 @@ const threadMat = {
 
   window.MOBILE = {
     title: "teardrop shapes curved down, curve axis perpendicular line between point and rounnd end, shades of green",
-    string: 60,
     buildSheet: true,
     hideJoints: true,   // no dots where strings meet leaves
     mmPerUnit: 2.0,
-    root: leaf('L0', 0, s0, green(0), [
-      fat(s0, 80, leaf('L01', 1, s01, green(1), [])),
-      tip(s0, 80, leaf('L02', 1, s02, green(2), [
-        fat(s02, 70, leaf('L021', 2, s021, green(3), [])),
-        tip(s02, 70, leaf('L022', 2, s022, green(4), [
-          fat(s022, 60, leaf('L0221', 3, s0221, green(5), [])),
-          tip(s022, 60, leaf('L0222', 3, s0222, green(6), []))
+    root: leaf('L0', 0, s0, green(0), 60, [
+      fat(s0, leaf('L01', 1, s01, green(1), 80, [])),
+      tip(s0, leaf('L02', 1, s02, green(2), 80, [
+        fat(s02, leaf('L021', 2, s021, green(3), 70, [])),
+        tip(s02, leaf('L022', 2, s022, green(4), 70, [
+          fat(s022, leaf('L0221', 3, s0221, green(5), 60, [])),
+          tip(s022, leaf('L0222', 3, s0222, green(6), 60, []))
         ]))
       ]))
     ])

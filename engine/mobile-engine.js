@@ -8,6 +8,12 @@
    Any node (rod OR shape) can have children:
      children: [ { offset:<number>, string:<number>, anchorY?:<0..1>, node:<node> }, ... ]
 
+   Every node (rod OR shape) can also set its own
+     string:<number >= 0>   // length of the string it hangs from, in simulator units
+   A node's own `string` wins over the `string` on its parent's child entry (which still works, so older
+   specs are unchanged) and, for the root, over spec.string (default 60). A negative or non-numeric value
+   is an ERROR (string_length); giving both and different values is a WARN (string_conflict).
+
    "rod" node:
      { type:'rod',
        pivot: <number|undefined> }   // local x of hang point; omit to auto-balance
@@ -420,6 +426,21 @@ function rodExtent(node){
   let lo = 0, hi = 0;
   for(const c of (node.children||[])){ lo = Math.min(lo, c.offset); hi = Math.max(hi, c.offset); }
   return [lo, hi];
+}
+
+// Length of the string a node hangs from (simulator units). The node's own valid `string` wins, then the
+// parent's link `{ string }`; the root falls back to spec.string, then 60.
+function ownString(node){
+  const s = node.string;
+  return (typeof s === 'number' && isFinite(s) && s >= 0) ? s : undefined;
+}
+function stringOf(c){
+  const s = ownString(c.node);
+  return s !== undefined ? s : (c.string || 0);
+}
+function rootStringOf(spec){
+  const s = ownString(spec.root);
+  return s !== undefined ? s : (spec.string || 60);
 }
 
 // Stable unique ids, shared by verifier messages and the build sheet. Duplicate `id`s get a suffix.
@@ -1017,7 +1038,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
     // Inspect children first so we know their exact physical masses in grams
     const childResults = [];
     for(const c of (node.children || [])){
-      const cRes = inspectNode(c.node, depthLevel + 1, c.string || 0, nodeId);
+      const cRes = inspectNode(c.node, depthLevel + 1, stringOf(c), nodeId);
       childResults.push({ link: c, report: cRes });
     }
 
@@ -1598,7 +1619,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
           vx = lx * Math.cos(lean); vz = 0; vy = -lx * Math.sin(lean);
           yTol = Math.abs(lx) * SWAY_AMPLITUDE; // the rod rocks, so one end rises while the other drops
         }
-        const len = c.string || 0;
+        const len = stringOf(c);
         walk(c.node, rec.path, edges.concat([{ m: Math.hypot(vx, vz), len, yTol }]), X + vx, Z + vz, Y + vy + len);
       }
     })(spec.root, [], [], 0, 0, 0);
@@ -1696,7 +1717,27 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
     }
   }
 
-  const rootReport = inspectNode(spec.root, 0, spec.string || 60, 'ceiling');
+  // String lengths: reject unusable values and flag a node whose own `string` overrides a different one.
+  (function checkStrings(){
+    const check = (node, linkLen, linkWhere)=>{
+      const id = node._id, own = ownString(node);
+      if(node.string !== undefined && own === undefined){
+        addIssue('ERROR', 'string_length', id,
+          `"${id}" has string ${JSON.stringify(node.string)}; it must be a number >= 0 (simulator units).`,
+          { value: node.string });
+      } else if(own !== undefined && linkLen !== undefined && linkLen !== own){
+        addIssue('WARN', 'string_conflict', id,
+          `"${id}" sets string ${own} but ${linkWhere} gives ${linkLen}; using ${own}.`,
+          { string: own, ignored: linkLen });
+      }
+    };
+    check(spec.root, spec.string, 'spec.string');
+    (function walk(n){
+      for(const c of (n.children || [])){ check(c.node, c.string, 'its parent link'); walk(c.node); }
+    })(spec.root);
+  })();
+
+  const rootReport = inspectNode(spec.root, 0, rootStringOf(spec), 'ceiling');
   checkSwingClearance();
   const errorCount = issues.filter(i => i.severity === 'ERROR').length;
   const warnCount  = issues.filter(i => i.severity === 'WARN').length;
@@ -1870,8 +1911,9 @@ function drawNode(parentGroup, defs, node, worldX, worldY, depth){
       ax = worldX + p.dx; ay = worldY + p.dy; childDepth = depth + p.z;
     }
     if(!HIDE_JOINTS) parentGroup.appendChild(el('circle', {cx:ax, cy:ay, r:2.6, fill:'var(--steel)'}));
-    const childWorldY = ay + c.string * ce;
-    const nextDepth = childDepth - c.string * se;
+    const len = stringOf(c);
+    const childWorldY = ay + len * ce;
+    const nextDepth = childDepth - len * se;
     parentGroup.appendChild(el('line', {x1:ax, y1:ay, x2:ax, y2:childWorldY, stroke:'var(--string)', 'stroke-width':1.4}));
     drawNode(parentGroup, defs, c.node, ax, childWorldY, nextDepth);
   }
@@ -2165,8 +2207,9 @@ function start(spec, shapeMat, rodMat, threadMat){
     rebuildScene();
     hitList = [];
     const rootTop = {x:500, y:24};
-    const topStr = (spec.string||60) * Math.cos(camElev);
-    const topDepth = -(spec.string||60) * Math.sin(camElev);
+    const rootLen = rootStringOf(spec);
+    const topStr = rootLen * Math.cos(camElev);
+    const topDepth = -rootLen * Math.sin(camElev);
     layer.appendChild(el('line', {x1:rootTop.x, y1:rootTop.y, x2:rootTop.x, y2:rootTop.y+topStr,
       stroke:'var(--string)', 'stroke-width':1.4}));
     drawNode(layer, defs, spec.root, rootTop.x, rootTop.y+topStr, topDepth);
