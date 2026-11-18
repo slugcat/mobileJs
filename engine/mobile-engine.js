@@ -90,8 +90,15 @@
 
    2. `rodMat` (Round Dowel Parameters):
      {
-       material: <'pine'|'oak', default 'pine'>,
-              // pine (500 kg/m^3, E=9.0 GPa, MOR=60 MPa) | oak (750 kg/m^3, E=12.5 GPa, MOR=95 MPa)
+       material: <'pine'|'oak'|'basswood'|'spruce'|'birch'|'bamboo'|'carbon_fiber'|'fiberglass'|'aluminum',
+                  default 'pine'>,
+              // kg/m^3 | E (GPa) | strength (MPa)  (typical handbook values; MOR for wood/composites, yield for aluminum)
+              //   pine 500 | 9.0 | 60       oak 750 | 12.5 | 95      basswood 415 | 9.5 | 55
+              //   spruce 400 | 10.8 | 70    birch 650 | 13.5 | 105   bamboo 700 | 12 | 100
+              //   carbon_fiber 1550 | 125 | 1200   fiberglass 1900 | 40 | 800   aluminum 2700 | 69 | 275
+              // carbon_fiber, fiberglass and aluminum cannot be grooved: their default grooveDepthMm is 0,
+              // so tie each string with a CA-glued bead or wrap instead (the cut-groove checks are skipped).
+              // Override any value with densityKgM3 / E_MPa / morMPa.
        diameterMm: <number, default 3.175>,
               // round dowel diameter in mm (3.175 = 1/8", 4.763 = 3/16", 6.35 = 1/4")
        attachmentMethod: <'groove_tied'|'drilled_hole', default 'groove_tied'>,
@@ -128,7 +135,7 @@
      pinholeDiameterMm: <default max(0.6, 2 x thread diameter)>
      minHoleSpacingMm:  <default 2 x minEdgeMarginMm>  // centre-to-centre between hang/child holes on one sheet
    rodMat also takes:
-     grooveDepthMm:   <default min(0.25 x diameter, max(0.5, 2 x thread diameter))>  // groove_tied ring groove
+     grooveDepthMm:   <default min(0.25 x diameter, max(0.5, 2 x thread diameter)); 0 for materials that cannot be grooved>  // groove_tied ring groove
      grooveKt:        <default 1.3>   // notch allowance on the reduced section
      minTieSpacingMm: <default groove: max(3, 1.5 x D); drilled: max(5 x hole dia, 2 x D)>
 
@@ -206,6 +213,53 @@ const MATERIAL_PRESETS = {
       densityKgM3: 750,
       E_MPa: 12500,
       morMPa: 95
+    },
+    // Lightest common wood dowels: best stiffness per gram of the woods.
+    spruce: {
+      name: 'Spruce Round Rod',
+      densityKgM3: 400,
+      E_MPa: 10800,
+      morMPa: 70
+    },
+    basswood: {
+      name: 'Basswood Round Rod',
+      densityKgM3: 415,
+      E_MPa: 9500,
+      morMPa: 55
+    },
+    birch: {
+      name: 'Birch / Beech Hardwood Round Rod',
+      densityKgM3: 650,
+      E_MPa: 13500,
+      morMPa: 105
+    },
+    bamboo: {
+      name: 'Bamboo Round Rod',
+      densityKgM3: 700,
+      E_MPa: 12000,
+      morMPa: 100
+    },
+    // Non-wood rods. grooveable:false -> default grooveDepthMm is 0 (tie with a CA-glued bead or wrap).
+    carbon_fiber: {
+      name: 'Carbon-Fibre Round Rod (pultruded, solid)',
+      densityKgM3: 1550,
+      E_MPa: 125000,
+      morMPa: 1200,
+      grooveable: false
+    },
+    fiberglass: {
+      name: 'Fibreglass Round Rod (pultruded, solid)',
+      densityKgM3: 1900,
+      E_MPa: 40000,
+      morMPa: 800,
+      grooveable: false
+    },
+    aluminum: {
+      name: 'Aluminium 6061-T6 Round Rod',
+      densityKgM3: 2700,
+      E_MPa: 69000,
+      morMPa: 275,       // yield strength (ductile), used where wood uses MOR
+      grooveable: false
     }
   },
   threads: {
@@ -927,7 +981,7 @@ function normalizeMaterialParams(spec, shapeArg, rodArg, threadArg, optionsArg){
     finishCoatGPerM2: sIn.finishCoatGPerM2 !== undefined ? sIn.finishCoatGPerM2 : 20
   };
 
-  // 2. Rod material normalization (pine or oak round rod of specified diameter)
+  // 2. Rod material normalization (round rod of specified diameter; see MATERIAL_PRESETS.rods)
   const rodKey = pick(MATERIAL_PRESETS.rods, rIn.material || rIn.type || rIn.wood || 'pine', 'pine', 'rod material');
   const baseRod = MATERIAL_PRESETS.rods[rodKey];
   const rods = {
@@ -965,7 +1019,8 @@ function normalizeMaterialParams(spec, shapeArg, rodArg, threadArg, optionsArg){
   shapes.pinholeDiameterMm = sIn.pinholeDiameterMm !== undefined ? sIn.pinholeDiameterMm : Math.max(0.6, 2 * threads.diameterMm);
   shapes.minHoleSpacingMm  = sIn.minHoleSpacingMm  !== undefined ? sIn.minHoleSpacingMm  : 2 * shapes.minEdgeMarginMm;
   rods.grooveDepthMm = rIn.grooveDepthMm !== undefined ? rIn.grooveDepthMm
-                     : Math.min(0.25 * rods.diameterMm, Math.max(0.5, 2 * threads.diameterMm));
+                     : (baseRod.grooveable === false ? 0   // carbon / glass / metal: no cut groove
+                     : Math.min(0.25 * rods.diameterMm, Math.max(0.5, 2 * threads.diameterMm)));
   rods.grooveKt = rIn.grooveKt || 1.3;
   rods.minTieSpacingMm = rIn.minTieSpacingMm !== undefined ? rIn.minTieSpacingMm
                        : (rods.attachmentMethod === 'drilled_hole' ? Math.max(5 * rods.holeDiameterMm, 2 * rods.diameterMm)
@@ -1455,7 +1510,7 @@ function verifyMobile(spec, shapeMat, rodMat, threadMat, options){
       // ratio test applies at every scale; the small absolute floor only ignores numerical dust
       if(maxDeflMm / maxArmMm > R.maxDeflectionRatio && maxDeflMm > 0.05){
         addIssue('WARN', 'rod_sagging', nodeId,
-          `${R.name} "${nodeId}" tips sag by ${maxDeflMm.toFixed(2)} mm (${(maxDeflMm/maxArmMm*100).toFixed(2)}% of arm span); increase rod diameter above ${R.diameterMm} mm or switch to oak.`,
+          `${R.name} "${nodeId}" tips sag by ${maxDeflMm.toFixed(2)} mm (${(maxDeflMm/maxArmMm*100).toFixed(2)}% of arm span); increase rod diameter above ${R.diameterMm} mm or switch to a stiffer rod (oak, birch, carbon_fiber).`,
           { maxDeflMm, maxArmMm, ratio: maxDeflMm / maxArmMm }
         );
       }
