@@ -1,5 +1,5 @@
 /* Mobile specification: pure data, no engine code.
-   Schema is documented at the top of engine/mobile-engine.js.
+   Schema is documented at the top of engine/src/schema.js.
 
    Every shape is the same 'ovate' leaf (pointed tip, fat rounded base), bent
    along its line of symmetry by the same amount, and rolled 90 deg so its
