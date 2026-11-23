@@ -19,7 +19,7 @@
        pivot: <number|undefined> }   // local x of hang point; omit to auto-balance
 
    "shape" node:
-     { type:'shape', shape:'disc'|'blob'|'crescent'|'diamond'|'leaf'|'ovate'|'triangle'|'rect',
+     { type:'shape', shape:'disc'|'blob'|'crescent'|'diamond'|'leaf'|'teardrop'|'triangle'|'rect',
        size:<number>, color:'#hex', weight:<number|undefined>, // grams; omit to derive from area x thickness x density (shapeMat)
        density:<number optional>,    // mass per unit area (g/unit^2); overrides the material-derived mass when weight is omitted
        orientation:<degrees, static in-plane rotation, default 0>,

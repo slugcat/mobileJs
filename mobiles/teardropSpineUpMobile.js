@@ -1,7 +1,7 @@
 /* Mobile specification: pure data, no engine code.
    Schema is documented at the top of engine/src/schema.js.
 
-   Every shape is the same 'ovate' leaf (pointed tip, fat rounded base), with
+   Every shape is the same 'teardrop' leaf (pointed tip, fat rounded base), with
    its bend axis running along its line of symmetry from the pointed tip to
    the rounded base (bendAxis: 0, 90 deg from the original), and rolled 90 deg
    so its axis is horizontal: fat end on the left, pointed end on the right.
@@ -62,7 +62,7 @@ const threadMat = {
   // stringLen = length of the string this leaf hangs from (its incoming string), simulator units.
   function leaf(id, level, size, color, stringLen, kids){
     const bend = BEND_TOP + (BEND_BOT - BEND_TOP) * (level / 3);
-    return { id:id, type:'shape', shape:'ovate', size:size, color:color, string:stringLen,
+    return { id:id, type:'shape', shape:'teardrop', size:size, color:color, string:stringLen,
              orientation:90, targetSlope:-BASE_TILT + -TILT*level, bend:bend, bendAxis:1,
              children:kids };
   }

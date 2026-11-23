@@ -20,7 +20,7 @@
    {
     "nodeId": "L01",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 1,
     "lengthMm": 307.2,
     "areaCm2": 399.53423,
@@ -35,7 +35,7 @@
    {
     "nodeId": "L021",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 2,
     "lengthMm": 153.6,
     "areaCm2": 99.88356,
@@ -50,7 +50,7 @@
    {
     "nodeId": "L0221",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 3,
     "lengthMm": 76.8,
     "areaCm2": 24.97089,
@@ -65,7 +65,7 @@
    {
     "nodeId": "L0222",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 3,
     "lengthMm": 60,
     "areaCm2": 15.24102,
@@ -80,7 +80,7 @@
    {
     "nodeId": "L022",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 2,
     "lengthMm": 120,
     "areaCm2": 60.96409,
@@ -95,7 +95,7 @@
    {
     "nodeId": "L02",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 1,
     "lengthMm": 240,
     "areaCm2": 243.85634,
@@ -110,7 +110,7 @@
    {
     "nodeId": "L0",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 0,
     "lengthMm": 480,
     "areaCm2": 975.42537,
@@ -141,7 +141,7 @@
    {
     "nodeId": "L01",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 1,
     "lengthMm": 280,
     "areaCm2": 331.91558,
@@ -156,7 +156,7 @@
    {
     "nodeId": "L021",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 2,
     "lengthMm": 154,
     "areaCm2": 100.40446,
@@ -171,7 +171,7 @@
    {
     "nodeId": "L0221",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 3,
     "lengthMm": 84.7,
     "areaCm2": 30.37235,
@@ -186,7 +186,7 @@
    {
     "nodeId": "L0222",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 3,
     "lengthMm": 66.55,
     "areaCm2": 18.75028,
@@ -201,7 +201,7 @@
    {
     "nodeId": "L022",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 2,
     "lengthMm": 121,
     "areaCm2": 61.98439,
@@ -216,7 +216,7 @@
    {
     "nodeId": "L02",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 1,
     "lengthMm": 220,
     "areaCm2": 204.90707,
@@ -231,7 +231,7 @@
    {
     "nodeId": "L0",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 0,
     "lengthMm": 400,
     "areaCm2": 677.37873,
@@ -259,12 +259,12 @@
   },
   "issues": [
    "ERROR:shape_bending_fracture:leaf1",
-   "ERROR:shape_bending_fracture:ovate1",
+   "ERROR:shape_bending_fracture:teardrop1",
    "ERROR:swing_collision:R1",
    "ERROR:swing_collision:dia1",
    "ERROR:swing_collision:disc1",
    "ERROR:swing_collision:leaf1",
-   "ERROR:swing_collision:ovate1",
+   "ERROR:swing_collision:teardrop1",
    "ERROR:swing_collision:tri1",
    "WARN:fragile_edge_margin:cres1",
    "WARN:hang_slope_mismatch:blob1",
@@ -374,9 +374,9 @@
     "maxGrooveStressMPa": 2.45241
    },
    {
-    "nodeId": "ovate1",
+    "nodeId": "teardrop1",
     "type": "shape",
-    "shape": "ovate",
+    "shape": "teardrop",
     "depthLevel": 2,
     "lengthMm": 88,
     "areaCm2": 32.78513,

@@ -25,7 +25,7 @@ window.MOBILE = {
       { offset: 40, node: sh('leaf1', 'leaf', 20, { bend: 1.0, bendAxis: 90 }) }
     ] } },
     { offset: 45, node: { type: 'rod', id: 'R2', string: 50, children: [
-      { offset: -30, node: sh('ovate1', 'ovate', 22, { orientation: 90, targetSlope: -15, bend: 1.0, bendAxis: 90 }) },
+      { offset: -30, node: sh('teardrop1', 'teardrop', 22, { orientation: 90, targetSlope: -15, bend: 1.0, bendAxis: 90 }) },
       { offset: 5, node: sh('tri1', 'triangle', 18) },
       { offset: 40, node: sh('rect1', 'rect', 16, { weight: 4 }) }
     ] } }

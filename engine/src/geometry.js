@@ -17,7 +17,7 @@ function shapeDef(shape, size){
       for(let i=1;i<N;i++){ const a = (2*Math.PI - be) - (2*Math.PI - 2*be)*i/N; pts.push([c + ri*Math.cos(a), ri*Math.sin(a)]); }
       return {kind:'polygon', points:pts};
     }
-    case 'ovate': // asymmetric leaf: pointed tip at y=-size, fat rounded end at y=+size, axis of symmetry = y axis
+    case 'teardrop': // asymmetric leaf: pointed tip at y=-size, fat rounded end at y=+size, axis of symmetry = y axis
       return {kind:'path', d:`M 0 ${-size} C ${size*0.25} ${-size*0.45}, ${size*0.78} ${-size*0.05}, ${size*0.62} ${size*0.5}
                  C ${size*0.52} ${size*0.88}, ${size*0.22} ${size}, 0 ${size}
                  C ${-size*0.22} ${size}, ${-size*0.52} ${size*0.88}, ${-size*0.62} ${size*0.5}
