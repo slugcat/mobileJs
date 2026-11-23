@@ -27,7 +27,7 @@ const shapeMat = {
   grainAngleDeg: 90,
   holeReinforced: true,    // CA-hardened pinholes
   minEdgeMarginMm: 3.0,
-  finishCoatGPerM2: 20
+  finishCoatGPerM2: 60     // spray-painted opaque (sealer + colour coats) to hide the grain
 };
 
 const rodMat = {

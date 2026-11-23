@@ -5,7 +5,7 @@
 const shapeMat = {
   material: 'balsa', grade: 'medium', thicknessMm: 1.588, layers: 2, crossGrainLayers: false,
   glueType: 'pva', warmWetBent: true, grainAngleDeg: 90, holeReinforced: true,
-  minEdgeMarginMm: 3.0, finishCoatGPerM2: 20
+  minEdgeMarginMm: 3.0   // finishCoatGPerM2 omitted on purpose: exercises the painted-balsa default
 };
 const rodMat = { material: 'pine', diameterMm: 3.175, attachmentMethod: 'groove_tied', maxDeflectionRatio: 0.01 };
 const threadMat = { material: 'cotton_glace', diameterMm: 0.25, safetyFactor: 4.0 };

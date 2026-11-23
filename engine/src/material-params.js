@@ -86,7 +86,8 @@ function normalizeMaterialParams(spec, shapeArg, rodArg, threadArg, optionsArg){
     warmWetBent: !!sIn.warmWetBent, // default false: never assume a forming process the builder did not declare
     holeReinforced: !!sIn.holeReinforced,
     minEdgeMarginMm: sIn.minEdgeMarginMm !== undefined ? sIn.minEdgeMarginMm : 3.0,
-    finishCoatGPerM2: sIn.finishCoatGPerM2 !== undefined ? sIn.finishCoatGPerM2 : 20
+    finishCoatGPerM2: sIn.finishCoatGPerM2 !== undefined ? sIn.finishCoatGPerM2
+                    : (shapePresetGroup.finishCoatGPerM2 !== undefined ? shapePresetGroup.finishCoatGPerM2 : 20) // balsa: painted, grain hidden
   };
 
   // 2. Rod material normalization (round rod of specified diameter; see MATERIAL_PRESETS.rods)

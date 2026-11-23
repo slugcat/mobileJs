@@ -84,8 +84,10 @@
               // true if pinholes are hardened with thin CA glue or micro-grommets (2.8x tear-out)
        minEdgeMarginMm: <number, default 3.0>,
               // minimum safe distance in mm from any attachment hole to the cut edge
-       finishCoatGPerM2: <number, default 20>
-              // paint/sealer mass per face in g/m^2 (applied to both sides)
+       finishCoatGPerM2: <number, default 60 for balsa, 20 for other woods>
+              // paint/sealer mass per face in g/m^2 (applied to both sides).
+              // Balsa is assumed spray-painted opaque enough to hide the grain (sealer/primer + ~2 colour coats);
+              // 60 is a rough estimate. Grain still governs strength (grainAngleDeg), painting only hides it.
      }
 
    2. `rodMat` (Round Dowel Parameters):
@@ -150,7 +152,7 @@
        grainAngleDeg: 90,
        holeReinforced: true,    // CA-hardened pinholes
        minEdgeMarginMm: 3.0,
-       finishCoatGPerM2: 20
+       finishCoatGPerM2: 60     // spray-painted opaque (grain hidden); omit to get this balsa default
      };
      const rodMat = {
        material: 'pine',

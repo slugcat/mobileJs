@@ -9,6 +9,10 @@ const EDGE_EPS_MM = 0.1;              // a hole within this distance of the cut 
 const MATERIAL_PRESETS = {
   shapes: {
     balsa: {
+      // Assumed finish: spray-painted opaque enough to hide the grain, i.e. sanding sealer/primer (balsa soaks
+      // up a lot) plus ~2 colour coats, ~70 um dry film at ~1.3 g/m^2 per um. Per face, g/m^2. A rough estimate;
+      // override per mobile with shapeMat.finishCoatGPerM2.
+      finishCoatGPerM2: 60,
       grades: {
         soft:   { densityKgM3: 100, E_L_MPa: 2100, E_T_MPa: 35, sigmaBendMPa: 11.0, tauShearMPa: 1.2 },
         medium: { densityKgM3: 160, E_L_MPa: 3400, E_T_MPa: 55, sigmaBendMPa: 18.0, tauShearMPa: 2.0 },
